@@ -10,52 +10,118 @@ import SwiftData
 
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
-    @Query private var items: [Item]
+    @Query(sort: \InstructionDocument.createdDate, order: .reverse) 
+    private var documents: [InstructionDocument]
+    
+    @State private var showingImportView = false
+    @State private var showingGlossary = false
 
     var body: some View {
-        NavigationSplitView {
-            List {
-                ForEach(items) { item in
-                    NavigationLink {
-                        Text("Item at \(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))")
-                    } label: {
-                        Text(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))
+        NavigationStack {
+            Group {
+                if documents.isEmpty {
+                    ContentUnavailableView {
+                        Label("No Patterns", systemImage: "doc.text.image")
+                    } description: {
+                        Text("Import your first knitting or crocheting pattern to get started")
+                    } actions: {
+                        Button {
+                            showingImportView = true
+                        } label: {
+                            Label("Import Pattern", systemImage: "plus")
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                } else {
+                    List {
+                        ForEach(documents) { document in
+                            NavigationLink {
+                                DocumentViewerView(document: document)
+                            } label: {
+                                DocumentRowView(document: document)
+                            }
+                        }
+                        .onDelete(perform: deleteDocuments)
                     }
                 }
-                .onDelete(perform: deleteItems)
             }
+            .navigationTitle("Yarn & Yarn")
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button {
+                        showingGlossary = true
+                    } label: {
+                        Label("Glossary", systemImage: "book.closed")
+                    }
+                }
+                
                 ToolbarItem(placement: .navigationBarTrailing) {
                     EditButton()
+                        .disabled(documents.isEmpty)
                 }
-                ToolbarItem {
-                    Button(action: addItem) {
-                        Label("Add Item", systemImage: "plus")
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        showingImportView = true
+                    } label: {
+                        Label("Import Pattern", systemImage: "plus")
                     }
                 }
             }
-        } detail: {
-            Text("Select an item")
+            .sheet(isPresented: $showingImportView) {
+                DocumentImportView()
+            }
+            .sheet(isPresented: $showingGlossary) {
+                GlossaryBrowserView()
+            }
         }
     }
 
-    private func addItem() {
-        withAnimation {
-            let newItem = Item(timestamp: Date())
-            modelContext.insert(newItem)
-        }
-    }
-
-    private func deleteItems(offsets: IndexSet) {
+    private func deleteDocuments(offsets: IndexSet) {
         withAnimation {
             for index in offsets {
-                modelContext.delete(items[index])
+                modelContext.delete(documents[index])
             }
         }
     }
 }
 
+struct DocumentRowView: View {
+    let document: InstructionDocument
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            // Document type icon
+            Image(systemName: document.isPDF ? "doc.fill" : "photo.fill")
+                .font(.title2)
+                .foregroundStyle(document.isPDF ? .red : .blue)
+                .frame(width: 40)
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text(document.title)
+                    .font(.headline)
+                
+                HStack {
+                    Text(document.createdDate, format: .dateTime.month().day().year())
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    
+                    if !document.markers.isEmpty {
+                        Text("•")
+                            .foregroundStyle(.secondary)
+                        Text("\(document.markers.count) marker\(document.markers.count == 1 ? "" : "s")")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            
+            Spacer()
+        }
+        .padding(.vertical, 4)
+    }
+}
+
 #Preview {
     ContentView()
-        .modelContainer(for: Item.self, inMemory: true)
+        .modelContainer(for: InstructionDocument.self, inMemory: true)
 }
