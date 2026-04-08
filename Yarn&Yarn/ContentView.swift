@@ -172,7 +172,7 @@ struct TagChipRow: View {
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
                     .background(Color.accentColor.opacity(0.12))
-                    .foregroundStyle(.accent)
+                    .foregroundStyle(Color.accentColor)
                     .clipShape(Capsule())
             }
             if tags.count > maxVisible {
