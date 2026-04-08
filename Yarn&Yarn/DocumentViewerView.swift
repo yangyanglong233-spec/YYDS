@@ -22,6 +22,7 @@ struct DocumentViewerView: View {
     @State private var showingGlossary = false
     @State private var currentPage = 0 // Track current page
     @State private var showingTextReader = false // Toggle between PDF and text reader
+    @State private var showingEditSheet = false
     
     var body: some View {
         ZStack {
@@ -114,6 +115,14 @@ struct DocumentViewerView: View {
                     } label: {
                         Label("View Glossary", systemImage: "book.closed")
                     }
+
+                    Divider()
+
+                    Button {
+                        showingEditSheet = true
+                    } label: {
+                        Label("Edit Info", systemImage: "pencil")
+                    }
                 } label: {
                     Image(systemName: "ellipsis.circle")
                 }
@@ -121,6 +130,9 @@ struct DocumentViewerView: View {
         }
         .sheet(isPresented: $showingGlossary) {
             GlossaryBrowserView()
+        }
+        .sheet(isPresented: $showingEditSheet) {
+            DocumentEditSheet(document: document)
         }
     }
     
