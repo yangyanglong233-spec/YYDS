@@ -158,18 +158,29 @@ struct NativePDFDocumentView: View {
     @Bindable var document: InstructionDocument
     let highlightingEnabled: Bool
     @Binding var currentPage: Int
-    
+
+    // Stored in @State so the PDFDocument object is created once and remains
+    // stable across re-renders. Without this, body creates a new PDFDocument
+    // on every render, which changes the .id() on NativePDFKitView and causes
+    // it to be destroyed and rebuilt (resetting the scroll position to page 1).
+    @State private var pdfDocument: PDFDocument?
+
     var body: some View {
-        if let pdfDocument = PDFDocument(data: pdfData) {
-            NativePDFReaderView(
-                pdfDocument: pdfDocument,
-                document: document,
-                highlightingEnabled: highlightingEnabled,
-                currentPage: $currentPage
-            )
-        } else {
-            Text("Unable to load PDF")
-                .foregroundStyle(.secondary)
+        Group {
+            if let pdfDocument = pdfDocument {
+                NativePDFReaderView(
+                    pdfDocument: pdfDocument,
+                    document: document,
+                    highlightingEnabled: highlightingEnabled,
+                    currentPage: $currentPage
+                )
+            } else {
+                Text("Unable to load PDF")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .task(id: pdfData) {
+            pdfDocument = PDFDocument(data: pdfData)
         }
     }
 }
