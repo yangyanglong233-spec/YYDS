@@ -262,12 +262,10 @@ struct NativePDFKitView: UIViewRepresentable {
             return
         }
         
-        let currentIndex = document.index(for: currentPDFPage)
-        
-        if currentIndex != currentPage,
-           let newPage = document.page(at: currentPage) {
-            pdfView.go(to: newPage)
-        }
+        // In vertical continuous scroll mode the user scrolls freely — do not
+        // call pdfView.go(to:) here, as it would reset the scroll position
+        // whenever updateUIView is called (e.g. on scale binding updates).
+        // Page tracking is handled exclusively by the PDFViewPageChanged notification.
         
         // Only update highlights if the highlighting state changed
         if highlightingEnabled != oldHighlightingEnabled {
@@ -599,9 +597,12 @@ struct NativePDFKitView: UIViewRepresentable {
             //print("⏱ tick — scale: \(pdfView.scaleFactor), markerCount: \(markerViewMap.count)")
             
             let scale = pdfView.scaleFactor
-            
-            // Update scale binding
-            updateScale(scale)
+
+            // Only update scale binding when zoom actually changes — avoids triggering
+            // updateUIView 60fps via the CADisplayLink, which would cause spurious page resets
+            if abs(scale - self.scale) > 0.001 {
+                updateScale(scale)
+            }
             
             for (id, markerView) in markerViewMap {
                 // Store current zoom scale before checking drag state
