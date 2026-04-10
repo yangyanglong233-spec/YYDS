@@ -60,7 +60,7 @@ final class Marker {
     
     // Computed properties
     var isCompleted: Bool {
-        type == .counter && currentCount >= targetCount
+        type == .counter && targetCount > 0 && currentCount >= targetCount
     }
     
     var progress: Double {
@@ -114,8 +114,8 @@ final class Marker {
     }
     
     static func counterMarker(
-        label: String = "Repeat",
-        targetCount: Int = 6,
+        label: String = "Counter",
+        targetCount: Int = 0,
         positionX: Double,
         positionY: Double,
         pageNumber: Int = 0,

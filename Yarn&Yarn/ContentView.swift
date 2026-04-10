@@ -38,28 +38,12 @@ struct ContentView: View {
                         .buttonStyle(.borderedProminent)
                     }
                 } else {
-                    ScrollView {
-                        LazyVGrid(
-                            columns: [GridItem(.flexible()), GridItem(.flexible())],
-                            spacing: 16
-                        ) {
-                            ForEach(documents) { document in
-                                NavigationLink(value: document) {
-                                    DocumentCardView(document: document)
-                                }
-                                .buttonStyle(.plain)
-                                .contextMenu {
-                                    Button("Edit Info", systemImage: "pencil") {
-                                        documentToEdit = document
-                                    }
-                                    Divider()
-                                    Button("Delete", systemImage: "trash", role: .destructive) {
-                                        modelContext.delete(document)
-                                    }
-                                }
-                            }
+                    ScrollView(.vertical) {
+                        HStack(alignment: .top, spacing: 12) {
+                            masonryColumn(parity: 0)
+                            masonryColumn(parity: 1)
                         }
-                        .padding()
+                        .padding(.horizontal, 16)
                     }
                 }
             }
@@ -94,6 +78,29 @@ struct ContentView: View {
             }
         }
     }
+
+    @ViewBuilder
+    private func masonryColumn(parity: Int) -> some View {
+        VStack(spacing: 12) {
+            ForEach(documents.indices.filter { $0 % 2 == parity }, id: \.self) { i in
+                let document = documents[i]
+                NavigationLink(value: document) {
+                    DocumentCardView(document: document)
+                }
+                .buttonStyle(.plain)
+                .contextMenu {
+                    Button("Edit Info", systemImage: "pencil") {
+                        documentToEdit = document
+                    }
+                    Divider()
+                    Button("Delete", systemImage: "trash", role: .destructive) {
+                        modelContext.delete(document)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .top)
+    }
 }
 
 // MARK: - Card view
@@ -105,39 +112,39 @@ struct DocumentCardView: View {
     var allTags: [String] { document.subjectTags + document.projectTags }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            // Cover image
-            ZStack {
-                Color(.secondarySystemBackground)
-                if let img = thumbnail {
-                    Image(uiImage: img)
-                        .resizable()
-                        .scaledToFill()
-                } else {
-                    Image(systemName: document.isPDF ? "doc.fill" : "photo.fill")
-                        .font(.system(size: 36))
-                        .foregroundStyle(.tertiary)
+        VStack(alignment: .leading, spacing: 8) {
+            // Cover image — Color.aspectRatio(.fit) owns the size;
+            // the image is overlaid so it never participates in layout measurement.
+            Color(.secondarySystemBackground)
+                .aspectRatio(3 / 4, contentMode: .fit)
+                .overlay {
+                    if let img = thumbnail {
+                        Image(uiImage: img)
+                            .resizable()
+                            .scaledToFill()
+                    } else {
+                        Image(systemName: document.isPDF ? "doc.fill" : "photo.fill")
+                            .font(.system(size: 36))
+                            .foregroundStyle(.tertiary)
+                    }
                 }
-            }
-            .aspectRatio(3 / 4, contentMode: .fill)
-            .clipped()
+                .clipped()
+                .clipShape(RoundedRectangle(cornerRadius: 10))
 
-            // Info
-            VStack(alignment: .leading, spacing: 6) {
-                Text(document.title)
-                    .font(.subheadline.weight(.medium))
-                    .lineLimit(2)
-                    .foregroundStyle(.primary)
+            Text(document.title)
+                .font(.subheadline.weight(.medium))
+                .lineLimit(2)
+                .foregroundStyle(.primary)
 
-                if !allTags.isEmpty {
-                    TagChipRow(tags: allTags, maxVisible: 3)
-                }
+            if !allTags.isEmpty {
+                TagChipRow(tags: allTags, maxVisible: 3)
             }
-            .padding(10)
         }
-        .background(Color(.systemBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .shadow(color: .black.opacity(0.08), radius: 6, x: 0, y: 2)
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 14).fill(Color(.systemBackground)))
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .shadow(color: .black.opacity(0.06), radius: 6, x: 0, y: 3)
         .task(id: document.id) {
             await loadThumbnail()
         }

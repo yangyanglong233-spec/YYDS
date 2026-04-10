@@ -23,6 +23,19 @@ struct DocumentViewerView: View {
     @State private var currentPage = 0 // Track current page
     @State private var showingTextReader = false // Toggle between PDF and text reader
     @State private var showingEditSheet = false
+    @State private var showingCounterPanel = false
+    @State private var counterToEdit: Marker?
+    @State private var visibleCounterIDs: Set<UUID> = []
+
+    private var counterMarkers: [Marker] {
+        let all = document.markers
+            .filter { $0.type == .counter }
+            .sorted { $0.createdDate < $1.createdDate }
+        // Show only counters whose badge is currently visible in the PDF viewport.
+        // Fall back to all counters on first load before the viewport has reported.
+        guard !visibleCounterIDs.isEmpty else { return all }
+        return all.filter { visibleCounterIDs.contains($0.id) }
+    }
     
     var body: some View {
         ZStack {
@@ -35,33 +48,36 @@ struct DocumentViewerView: View {
                     }
                 } else {
                     // PDF viewer mode - with markers and highlighting
-                    NativePDFDocumentView(pdfData: document.fileData, document: document, highlightingEnabled: highlightingEnabled, currentPage: $currentPage)
+                    NativePDFDocumentView(pdfData: document.fileData, document: document, highlightingEnabled: highlightingEnabled, currentPage: $currentPage, visibleCounterIDs: $visibleCounterIDs)
                 }
             } else {
                 ImageDocumentView(imageData: document.fileData, document: document, highlightingEnabled: highlightingEnabled)
             }
             
-            // Marker palette (draggable source - top right, stays on screen)
-            // Only show in PDF mode, not text reader mode
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
             if !showingTextReader {
-                VStack {
-                    HStack {
-                        Spacer()
-                        MarkerPaletteView(
-                            isDragging: $isDraggingMarker,
-                            onAddCounter: {
-                                addCounter(at: CGPoint(x: 0.5, y: 0.5))
-                            },
-                            onAddNote: {
-                                addNoteMarker(at: CGPoint(x: 0.5, y: 0.5))
-                            }
+                VStack(spacing: 0) {
+                    if showingCounterPanel && !counterMarkers.isEmpty {
+                        Divider()
+                        CounterPanelView(
+                            counters: counterMarkers,
+                            onEdit: { counterToEdit = $0 }
                         )
-                        .padding()
-                        .zIndex(1000) // Ensure it stays on top
                     }
-                    Spacer()
+                    DocumentToolbarBar(
+                        showingPanel: $showingCounterPanel,
+                        hasCounters: !counterMarkers.isEmpty,
+                        onAddCounter: addCounter,
+                        onGlossaryTap: { /* TODO: glossary */ }
+                    )
                 }
+                .background(.bar)
             }
+        }
+        .sheet(item: $counterToEdit) { counter in
+            CounterEditSheet(counter: counter)
+                .presentationDetents([.medium])
         }
         .navigationTitle(document.title)
         .navigationBarTitleDisplayMode(.inline)
@@ -88,28 +104,10 @@ struct DocumentViewerView: View {
             
             ToolbarItem(placement: .primaryAction) {
                 Menu {
-                    Menu {
-                        Button {
-                            addCounter(at: CGPoint(x: 0.5, y: 0.5))
-                        } label: {
-                            Label("Counter", systemImage: "number.circle")
-                        }
-                        
-                        Button {
-                            addNoteMarker(at: CGPoint(x: 0.5, y: 0.5))
-                        } label: {
-                            Label("Note", systemImage: "note.text")
-                        }
-                    } label: {
-                        Label("Add Marker", systemImage: "plus.circle")
-                    }
-                    
-                    Divider()
-                    
                     Toggle(isOn: $highlightingEnabled) {
                         Label("Highlight Terms", systemImage: "highlighter")
                     }
-                    
+
                     Button {
                         showingGlossary = true
                     } label: {
@@ -149,18 +147,26 @@ struct DocumentViewerView: View {
         try? modelContext.save()
     }
     
-    private func addCounter(at position: CGPoint) {
+    private let counterColorPool = [
+        "sage", "mauve", "terracotta", "steel", "gold", "lavender",
+        "forest", "rose", "slate", "amber", "plum", "linen"
+    ]
+
+    private func addCounter() {
+        let n = document.markers.filter { $0.type == .counter }.count
         let newMarker = Marker.counterMarker(
-            label: "Repeat",
-            targetCount: 6,
-            positionX: position.x,
-            positionY: position.y,
-            pageNumber: currentPage
+            label: "Counter \(n + 1)",
+            targetCount: 0,
+            positionX: 0.5,
+            positionY: 0.5,
+            pageNumber: currentPage,
+            color: counterColorPool.randomElement() ?? "green"
         )
         newMarker.document = document
         document.markers.append(newMarker)
         modelContext.insert(newMarker)
         try? modelContext.save()
+        withAnimation(.spring(response: 0.3)) { showingCounterPanel = true }
     }
 }
 
@@ -170,6 +176,7 @@ struct NativePDFDocumentView: View {
     @Bindable var document: InstructionDocument
     let highlightingEnabled: Bool
     @Binding var currentPage: Int
+    var visibleCounterIDs: Binding<Set<UUID>>
 
     // Stored in @State so the PDFDocument object is created once and remains
     // stable across re-renders. Without this, body creates a new PDFDocument
@@ -184,7 +191,8 @@ struct NativePDFDocumentView: View {
                     pdfDocument: pdfDocument,
                     document: document,
                     highlightingEnabled: highlightingEnabled,
-                    currentPage: $currentPage
+                    currentPage: $currentPage,
+                    visibleCounterIDs: visibleCounterIDs
                 )
             } else {
                 Text("Unable to load PDF")
@@ -225,12 +233,7 @@ struct PDFDocumentView: View {
                         .presentationDetents([.medium, .large])
                 }
             }
-            .sheet(isPresented: $showingCounterPopup) {
-                if let selectedMarker {
-                    CounterPopupView(marker: selectedMarker)
-                        .presentationDetents([.medium])
-                }
-            }
+            // Counter popup removed — counting happens in the bottom toolbar panel
         } else {
             Text("Unable to load PDF")
                 .foregroundStyle(.secondary)
@@ -765,11 +768,7 @@ struct MarkerView: View {
             showingEditor = true
         }
         .sheet(isPresented: $showingEditor) {
-            if marker.type == .counter {
-                CounterPopupView(marker: marker)
-            } else {
-                MarkerNoteEditorView(marker: marker)
-            }
+            MarkerNoteEditorView(marker: marker)
         }
     }
     
@@ -828,11 +827,7 @@ struct ImprovedMarkerView: View {
             showingEditor = true
         }
         .sheet(isPresented: $showingEditor) {
-            if marker.type == .counter {
-                CounterPopupView(marker: marker)
-            } else {
-                MarkerNoteEditorView(marker: marker)
-            }
+            MarkerNoteEditorView(marker: marker)
         }
     }
     
@@ -942,306 +937,302 @@ struct MarkerNoteEditorView: View {
     }
 }
 
-// MARK: - Marker Palette View
-struct MarkerPaletteView: View {
-    @Binding var isDragging: Bool
-    
-    var onAddCounter: () -> Void
-    var onAddNote: () -> Void
-    
+// MARK: - Counter color palette (shared by toolbar, row dots, edit sheet, and PDF badges)
+
+let counterColorNames = [
+    "sage", "mauve", "terracotta", "steel", "gold", "lavender",
+    "forest", "rose", "slate", "amber", "plum", "linen"
+]
+
+func counterColor(for name: String) -> Color {
+    switch name {
+    case "sage":       return Color(red: 0.48, green: 0.68, blue: 0.56)
+    case "mauve":      return Color(red: 0.75, green: 0.52, blue: 0.66)
+    case "terracotta": return Color(red: 0.83, green: 0.45, blue: 0.35)
+    case "steel":      return Color(red: 0.42, green: 0.61, blue: 0.75)
+    case "gold":       return Color(red: 0.83, green: 0.66, blue: 0.26)
+    case "lavender":   return Color(red: 0.61, green: 0.56, blue: 0.77)
+    case "forest":     return Color(red: 0.42, green: 0.56, blue: 0.37)
+    case "rose":       return Color(red: 0.91, green: 0.65, blue: 0.65)
+    case "slate":      return Color(red: 0.48, green: 0.56, blue: 0.65)
+    case "amber":      return Color(red: 0.79, green: 0.42, blue: 0.18)
+    case "plum":       return Color(red: 0.48, green: 0.31, blue: 0.45)
+    case "linen":      return Color(red: 0.78, green: 0.72, blue: 0.60)
+    default:           return Color(red: 0.48, green: 0.68, blue: 0.56)
+    }
+}
+
+/// Returns `.black` or `.white` — whichever gives higher WCAG contrast against the badge fill.
+func counterTextColor(for name: String) -> Color {
+    // Pre-computed from WCAG relative luminance — only plum (L≈0.13) needs white text.
+    switch name {
+    case "plum": return .white
+    default:     return .black
+    }
+}
+
+// MARK: - Document Toolbar Bar
+
+struct DocumentToolbarBar: View {
+    @Binding var showingPanel: Bool
+    let hasCounters: Bool
+    let onAddCounter: () -> Void
+    let onGlossaryTap: () -> Void
+
     var body: some View {
-        VStack(spacing: 12) {
-            Text("Add Markers")
+        HStack(spacing: 12) {
+            if hasCounters {
+                Button {
+                    withAnimation(.spring(response: 0.3)) { showingPanel.toggle() }
+                } label: {
+                    Image(systemName: showingPanel ? "chevron.down" : "chevron.up")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
+            }
+
+            Button(action: onGlossaryTap) {
+                Label("glossary", systemImage: "magnifyingglass")
+                    .font(.subheadline)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .foregroundStyle(Color.accentColor)
+                    .background(Capsule().stroke(Color.accentColor, lineWidth: 1.5))
+            }
+            .buttonStyle(.plain)
+
+            Button(action: onAddCounter) {
+                Label("+ counter", systemImage: "timer")
+                    .font(.subheadline)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .foregroundStyle(Color.accentColor)
+                    .background(Capsule().stroke(Color.accentColor, lineWidth: 1.5))
+            }
+            .buttonStyle(.plain)
+
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+}
+
+// MARK: - Counter Panel (expandable list above the toolbar bar)
+
+struct CounterPanelView: View {
+    let counters: [Marker]
+    let onEdit: (Marker) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("COUNTERS")
                 .font(.caption)
                 .fontWeight(.semibold)
                 .foregroundStyle(.secondary)
-            
-            VStack(spacing: 12) {
-                // Counter Marker Button
-                Button(action: onAddCounter) {
-                    MarkerPaletteCounterButton()
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+                .padding(.bottom, 6)
+
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 8) {
+                    ForEach(counters) { counter in
+                        CounterRowView(counter: counter, onEdit: { onEdit(counter) })
+                    }
                 }
-                .buttonStyle(.plain)
-                
-                // Note Marker Button
-                Button(action: onAddNote) {
-                    MarkerPaletteNoteButton()
-                }
-                .buttonStyle(.plain)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 12)
             }
+            .frame(maxHeight: 220)
         }
-        .padding()
-        .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(.ultraThinMaterial)
-                .shadow(color: .black.opacity(0.1), radius: 8, y: 4)
-        )
     }
 }
 
-struct MarkerPaletteCounterButton: View {
+// MARK: - Counter Row
+
+struct CounterRowView: View {
+    @Bindable var counter: Marker
+    let onEdit: () -> Void
+
     var body: some View {
-        VStack(spacing: 4) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(.blue.gradient)
-                    .frame(width: 50, height: 50)
-                    .shadow(color: .blue.opacity(0.3), radius: 4, y: 2)
-                
-                VStack(spacing: 2) {
-                    Image(systemName: "number.circle.fill")
-                        .font(.system(size: 20))
-                        .foregroundStyle(.white)
-                    
-                    Text("0/6")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.9))
-                }
+        HStack(spacing: 12) {
+            Circle()
+                .fill(counterColor(for: counter.color))
+                .frame(width: 12, height: 12)
+
+            Button {
+                counter.decrement()
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            } label: {
+                Image(systemName: "minus")
+                    .font(.system(size: 14, weight: .semibold))
+                    .frame(width: 32, height: 32)
+                    .background(Circle().stroke(Color(.separator), lineWidth: 1))
             }
-            
-            Text("Counter")
-                .font(.caption2)
-                .fontWeight(.medium)
-                .foregroundStyle(.secondary)
+            .buttonStyle(.plain)
+            .disabled(counter.currentCount == 0)
+
+            Text("\(counter.currentCount)")
+                .font(.system(size: 22, weight: .bold, design: .rounded))
+                .frame(minWidth: 32, alignment: .center)
+
+            Button {
+                counter.increment()
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 14, weight: .semibold))
+                    .frame(width: 32, height: 32)
+                    .background(Circle().stroke(Color(.separator), lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .disabled(counter.targetCount > 0 && counter.currentCount >= counter.targetCount)
+
+            if counter.targetCount > 0 {
+                Text("/ \(counter.targetCount)")
+                    .font(.system(size: 15))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Button(action: onEdit) {
+                Image(systemName: "pencil")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
         }
-        .contentShape(Rectangle())
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
     }
 }
 
-struct MarkerPaletteNoteButton: View {
-    var body: some View {
-        VStack(spacing: 4) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(.orange.gradient)
-                    .frame(width: 50, height: 50)
-                    .shadow(color: .orange.opacity(0.3), radius: 4, y: 2)
-                
-                Image(systemName: "note.text")
-                    .font(.system(size: 22))
-                    .foregroundStyle(.white)
-            }
-            
-            Text("Note")
-                .font(.caption2)
-                .fontWeight(.medium)
-                .foregroundStyle(.secondary)
-        }
-        .contentShape(Rectangle())
-    }
-}
+// MARK: - Counter Edit Sheet
 
-// MARK: - Counter Popup View
-struct CounterPopupView: View {
-    @Bindable var marker: Marker
+struct CounterEditSheet: View {
+    @Bindable var counter: Marker
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
-    
-    @State private var showingEditor = false
-    
-    // Get page count from document if available
-    var maxPages: Int {
-        guard let doc = marker.document,
-              doc.isPDF,
-              let pdfDoc = PDFDocument(data: doc.fileData) else {
-            return 10 // Default fallback
-        }
-        return pdfDoc.pageCount
-    }
-    
+    @State private var targetInput = ""
+
     var body: some View {
         NavigationStack {
-            VStack(spacing: 24) {
-                // Counter Display
-                VStack(spacing: 8) {
-                    Text(marker.counterLabel)
-                        .font(.title2)
-                        .fontWeight(.bold)
-                    
-                    HStack(spacing: 4) {
-                        Text("\(marker.currentCount)")
-                            .font(.system(size: 60, weight: .bold, design: .rounded))
-                            .foregroundStyle(marker.currentCount >= marker.targetCount ? .green : .primary)
-                        
-                        Text("/")
-                            .font(.system(size: 40, weight: .medium))
-                            .foregroundStyle(.secondary)
-                        
-                        Text("\(marker.targetCount)")
-                            .font(.system(size: 40, weight: .medium))
-                            .foregroundStyle(.secondary)
-                    }
-                    
-                    // Page indicator
-                    Text("Page \(marker.pageNumber + 1)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    
-                    // Progress Bar
-                    GeometryReader { geometry in
-                        ZStack(alignment: .leading) {
-                            RoundedRectangle(cornerRadius: 8)
-                                .fill(.quaternary)
-                            
-                            RoundedRectangle(cornerRadius: 8)
-                                .fill(marker.currentCount >= marker.targetCount ? Color.green : Color.blue)
-                                .frame(width: geometry.size.width * min(CGFloat(marker.currentCount) / CGFloat(marker.targetCount), 1.0))
+            VStack(spacing: 0) {
+                // Color swatches — 6 columns × 2 rows
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 6),
+                          spacing: 14) {
+                    ForEach(counterColorNames, id: \.self) { name in
+                        Button {
+                            counter.color = name
+                        } label: {
+                            Circle()
+                                .fill(counterColor(for: name))
+                                .frame(width: 36, height: 36)
+                                .overlay(
+                                    Circle()
+                                        .strokeBorder(
+                                            counter.color == name ? Color.primary : .clear,
+                                            lineWidth: 3
+                                        )
+                                )
                         }
+                        .buttonStyle(.plain)
                     }
-                    .frame(height: 12)
-                    .padding(.horizontal)
                 }
-                
-                // Buttons
-                VStack(spacing: 16) {
-                    // Increment/Decrement
-                    HStack(spacing: 20) {
-                        Button {
-                            marker.decrement()
-                            let impact = UIImpactFeedbackGenerator(style: .light)
-                            impact.impactOccurred()
-                        } label: {
-                            Image(systemName: "minus.circle.fill")
-                                .font(.system(size: 50))
-                                .foregroundStyle(marker.currentCount > 0 ? .red : .gray.opacity(0.3))
-                        }
-                        .disabled(marker.currentCount == 0)
-                        
-                        Button {
-                            marker.increment()
-                            let impact = UIImpactFeedbackGenerator(style: .medium)
-                            impact.impactOccurred()
-                        } label: {
-                            Image(systemName: "plus.circle.fill")
-                                .font(.system(size: 50))
-                                .foregroundStyle(.green)
-                        }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 18)
+
+                Divider()
+
+                // Set total
+                HStack(spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color.accentColor.opacity(0.15))
+                            .frame(width: 36, height: 36)
+                        Image(systemName: "plus")
+                            .foregroundStyle(Color.accentColor)
+                            .font(.system(size: 14, weight: .semibold))
                     }
-                    
-                    // Quick Actions
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Set total")
+                            .font(.body)
+                        Text("Current: \(counter.targetCount > 0 ? "\(counter.targetCount)" : "none")")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    TextField("—", text: $targetInput)
+                        .keyboardType(.numberPad)
+                        .multilineTextAlignment(.center)
+                        .frame(width: 60, height: 36)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color(.separator), lineWidth: 1)
+                        )
+                        .onChange(of: targetInput) { _, newValue in
+                            if let val = Int(newValue), val > 0 {
+                                counter.targetCount = val
+                            } else if newValue.trimmingCharacters(in: .whitespaces).isEmpty {
+                                counter.targetCount = 0
+                            }
+                        }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
+
+                Divider()
+
+                // Remove counter
+                Button {
+                    // Dismiss first so the sheet animation completes before
+                    // the PDF overlay rebuild fires (avoids visual jank).
+                    let ctx = modelContext
+                    let target = counter
+                    dismiss()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        ctx.delete(target)
+                        try? ctx.save()
+                    }
+                } label: {
                     HStack(spacing: 12) {
-                        Button {
-                            marker.reset()
-                        } label: {
-                            Label("Reset", systemImage: "arrow.counterclockwise")
-                                .frame(maxWidth: .infinity)
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.red.opacity(0.1))
+                                .frame(width: 36, height: 36)
+                            Image(systemName: "trash")
+                                .foregroundStyle(.red)
+                                .font(.system(size: 14))
                         }
-                        .buttonStyle(.bordered)
-                        .tint(.orange)
-                        
-                        Button {
-                            showingEditor = true
-                        } label: {
-                            Label("Edit", systemImage: "pencil")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.bordered)
-                        .tint(.blue)
-                        
-                        Button(role: .destructive) {
-                            modelContext.delete(marker)
-                            dismiss()
-                        } label: {
-                            Label("Delete", systemImage: "trash")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.bordered)
+                        Text("Remove counter")
+                            .foregroundStyle(.red)
+                        Spacer()
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 14)
                 }
-                
+                .buttonStyle(.plain)
+
+                Divider()
                 Spacer()
             }
-            .padding()
-            .navigationTitle("Counter")
+            .navigationTitle(counter.counterLabel.isEmpty ? "Counter" : counter.counterLabel)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") {
-                        dismiss()
-                    }
+                    Button("Done") { dismiss() }
+                        .fontWeight(.semibold)
                 }
             }
-            .sheet(isPresented: $showingEditor) {
-                CounterSettingsView(marker: marker)
-            }
-        }
-    }
-}
-
-// MARK: - Counter Settings View
-struct CounterSettingsView: View {
-    @Bindable var marker: Marker
-    @Environment(\.dismiss) private var dismiss
-    
-    // Get page count from document if available
-    var maxPages: Int {
-        guard let doc = marker.document,
-              doc.isPDF,
-              let pdfDoc = PDFDocument(data: doc.fileData) else {
-            return 10 // Default fallback
-        }
-        return pdfDoc.pageCount
-    }
-    
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Counter Settings") {
-                    TextField("Label", text: $marker.counterLabel)
-                    
-                    Stepper("Target: \(marker.targetCount)", value: $marker.targetCount, in: 1...999)
-                }
-                
-                Section("Position") {
-                    Picker("Page", selection: $marker.pageNumber) {
-                        ForEach(0..<maxPages, id: \.self) { pageIndex in
-                            Text("Page \(pageIndex + 1)").tag(pageIndex)
-                        }
-                    }
-                }
-                
-                Section("Color") {
-                    Picker("Marker Color", selection: $marker.color) {
-                        HStack {
-                            Circle().fill(.blue).frame(width: 16, height: 16)
-                            Text("Blue")
-                        }
-                        .tag("blue")
-                        
-                        HStack {
-                            Circle().fill(.green).frame(width: 16, height: 16)
-                            Text("Green")
-                        }
-                        .tag("green")
-                        
-                        HStack {
-                            Circle().fill(.red).frame(width: 16, height: 16)
-                            Text("Red")
-                        }
-                        .tag("red")
-                        
-                        HStack {
-                            Circle().fill(.orange).frame(width: 16, height: 16)
-                            Text("Yellow")
-                        }
-                        .tag("yellow")
-                        
-                        HStack {
-                            Circle().fill(.purple).frame(width: 16, height: 16)
-                            Text("Purple")
-                        }
-                        .tag("purple")
-                    }
-                }
-            }
-            .navigationTitle("Edit Counter")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") {
-                        dismiss()
-                    }
-                }
+            .onAppear {
+                targetInput = counter.targetCount > 0 ? "\(counter.targetCount)" : ""
             }
         }
     }

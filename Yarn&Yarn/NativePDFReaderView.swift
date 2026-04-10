@@ -16,7 +16,8 @@ struct NativePDFReaderView: View {
     @Bindable var document: InstructionDocument
     let highlightingEnabled: Bool
     @Binding var currentPage: Int
-    
+    var visibleCounterIDs: Binding<Set<UUID>>
+
     @State private var selectedTerm: KnittingGlossary.Term?
     @State private var showingTermDetail = false
     @State private var isLoadingTerm = false
@@ -67,7 +68,8 @@ struct NativePDFReaderView: View {
                 showingTermDetail: $showingTermDetail,
                 isLoadingTerm: $isLoadingTerm,
                 selectedMarker: $selectedMarker,
-                showingMarkerPopup: $showingMarkerPopup
+                showingMarkerPopup: $showingMarkerPopup,
+                visibleCounterIDs: visibleCounterIDs
             )
             .id(pdfDocument) // Prevent recreation unless document changes
             .overlay(alignment: .center) {
@@ -97,14 +99,11 @@ struct NativePDFReaderView: View {
             }
         }
         .sheet(isPresented: $showingMarkerPopup) {
-            if let selectedMarker {
-                if selectedMarker.type == .counter {
-                    CounterPopupView(marker: selectedMarker)
-                        .presentationDetents([.medium])
-                } else {
-                    MarkerNoteEditorView(marker: selectedMarker)
-                        .presentationDetents([.medium, .large])
-                }
+            // Counter markers no longer open a popup — counting happens in the toolbar panel.
+            // Only note markers open an edit sheet from the PDF.
+            if let selectedMarker, selectedMarker.type == .note {
+                MarkerNoteEditorView(marker: selectedMarker)
+                    .presentationDetents([.medium, .large])
             }
         }
     }
@@ -123,7 +122,8 @@ struct NativePDFKitView: UIViewRepresentable {
     @Binding var isLoadingTerm: Bool
     @Binding var selectedMarker: Marker?
     @Binding var showingMarkerPopup: Bool
-    
+    var visibleCounterIDs: Binding<Set<UUID>>
+
     @Environment(\.modelContext) private var modelContext
     
     func makeUIView(context: Context) -> UIView {
@@ -241,6 +241,7 @@ struct NativePDFKitView: UIViewRepresentable {
         context.coordinator.isLoadingTerm = $isLoadingTerm
         context.coordinator.selectedMarker = $selectedMarker
         context.coordinator.showingMarkerPopup = $showingMarkerPopup
+        context.coordinator.visibleCounterIDsBinding = visibleCounterIDs
         
         let oldHighlightingEnabled = context.coordinator.highlightingEnabled
         context.coordinator.highlightingEnabled = highlightingEnabled
@@ -289,7 +290,9 @@ struct NativePDFKitView: UIViewRepresentable {
             // Markers were added or removed — full rebuild needed
             context.coordinator.rebuildMarkerViews(markers: allMarkers)
         } else {
-            // Same markers, just reposition (zoom/scroll/SwiftUI redraw)
+            // Same markers — sync color + count labels (toolbar / edit sheet may have changed them)
+            context.coordinator.refreshAppearances(markers: allMarkers)
+            context.coordinator.refreshCountLabels(markers: allMarkers)
             context.coordinator.repositionMarkerViews()
         }
     }
@@ -334,6 +337,10 @@ struct NativePDFKitView: UIViewRepresentable {
         // Track which marker is currently being dragged
         var draggingMarkerID: UUID?
         var draggingMarkerView: SimpleMarkerView?
+
+        // Visible counter tracking — pushed to SwiftUI via binding when the set changes
+        var visibleCounterIDsBinding: Binding<Set<UUID>>?
+        var lastVisibleCounterIDs: Set<UUID> = []
         
         // Keep a strong reference to the haptic generator
         private let impactGenerator = UIImpactFeedbackGenerator(style: .medium)
@@ -588,14 +595,28 @@ struct NativePDFKitView: UIViewRepresentable {
             repositionMarkerViews()
         }
         
+        /// Update count labels on existing counter badges when counts change from the toolbar panel
+        func refreshCountLabels(markers: [Marker]) {
+            for marker in markers where marker.type == .counter {
+                markerViewMap[marker.id]?.refreshCount(marker.currentCount, target: marker.targetCount)
+            }
+        }
+
+        /// Refresh the fill color of every marker badge (called when color is changed in the edit sheet)
+        func refreshAppearances(markers: [Marker]) {
+            for marker in markers {
+                markerViewMap[marker.id]?.refreshAppearance()
+            }
+        }
+
         /// Reposition existing marker views (called continuously during zoom/scroll)
         @objc func repositionMarkerViews() {
             guard let pdfView = pdfView,
                   let overlayView = overlayView else { return }
-            
+
             // Temporary log to verify continuous tracking
             //print("⏱ tick — scale: \(pdfView.scaleFactor), markerCount: \(markerViewMap.count)")
-            
+
             let scale = pdfView.scaleFactor
 
             // Only update scale binding when zoom actually changes — avoids triggering
@@ -642,7 +663,31 @@ struct NativePDFKitView: UIViewRepresentable {
                 markerView.center = pointInOverlay  // 2. Set center on identity
                 markerView.transform = CGAffineTransform(scaleX: scale, y: scale)  // 3. Then apply scale
             }
-            
+
+            // Collect IDs of counter badges whose centre lies within the visible viewport.
+            // Exclude the area hidden behind the toolbar/counter panel:
+            // safeAreaInsets.bottom is updated by SwiftUI's .safeAreaInset modifier and
+            // equals the combined height of the toolbar + counter panel when open.
+            let panelHeight = overlayView.safeAreaInsets.bottom
+            let visibleRect = CGRect(
+                x: overlayView.bounds.minX,
+                y: overlayView.bounds.minY,
+                width: overlayView.bounds.width,
+                height: overlayView.bounds.height - panelHeight
+            )
+            var visibleIDs = Set<UUID>()
+            for (id, markerView) in markerViewMap {
+                guard let marker = currentMarkers.first(where: { $0.id == id }),
+                      marker.type == .counter else { continue }
+                if visibleRect.contains(markerView.center) {
+                    visibleIDs.insert(id)
+                }
+            }
+            if visibleIDs != lastVisibleCounterIDs {
+                lastVisibleCounterIDs = visibleIDs
+                visibleCounterIDsBinding?.wrappedValue = visibleIDs
+            }
+
             // Reposition highlight layers
             for (id, shapeLayer) in highlightLayerMap {
                 guard let marker = currentMarkers.first(where: { $0.id == id }),
@@ -1049,7 +1094,7 @@ class PassthroughView: UIView {
 /// A UIKit-based marker view that doesn't use SwiftUI or UIHostingController
 class SimpleMarkerView: UIView {
     let marker: Marker
-    let target: Int
+    var target: Int
     weak var presentingViewController: UIViewController?
     
     var isDragging: Bool = false
@@ -1066,7 +1111,7 @@ class SimpleMarkerView: UIView {
     private let countLabel = UILabel()
     private var checkmarkImageView: UIImageView?
     private var tapGesture: UITapGestureRecognizer?
-    private var svgShapeLayer: CAShapeLayer?  // SVG background for counter markers
+    private var shapeLayer: CAShapeLayer?  // Custom shape for counter markers
     
     init(marker: Marker, target: Int) {
         self.marker = marker
@@ -1082,120 +1127,126 @@ class SimpleMarkerView: UIView {
     }
     
     private func setupView() {
-        // Configure outer view
         backgroundColor = .clear
         clipsToBounds = false
         isUserInteractionEnabled = true
-        
-        // Try to load SVG background for counter markers
+
         if marker.type == .counter {
-            setupSVGBackground()
-        }
-        
-        // Configure inner view (36x36, centered in 44x44 frame)
-        innerView.frame = CGRect(x: 4, y: 4, width: 36, height: 36)
-        
-        // Only set background if SVG didn't load
-        if svgShapeLayer == nil {
-            innerView.backgroundColor = .systemYellow  // Default background
-            innerView.layer.cornerRadius = 10
-        } else {
+            // Label-shaped badge — shape layer provides fill and shadow
+            setupCounterShape()
             innerView.backgroundColor = .clear
             innerView.layer.cornerRadius = 0
+        } else {
+            // Note: rounded square centered in the 44×44 hit-test area
+            innerView.frame = CGRect(x: 4, y: 4, width: 36, height: 36)
+            innerView.backgroundColor = uiColorForMarker()
+            innerView.layer.cornerRadius = 10
+            innerView.layer.shadowColor = UIColor.black.cgColor
+            innerView.layer.shadowOpacity = 0.2
+            innerView.layer.shadowOffset = CGSize(width: 0, height: 2)
+            innerView.layer.shadowRadius = 4
         }
-        
-        innerView.layer.shadowColor = UIColor.black.cgColor
-        innerView.layer.shadowOpacity = 0.2
-        innerView.layer.shadowOffset = CGSize(width: 0, height: 2)
-        innerView.layer.shadowRadius = 4
+
         innerView.isUserInteractionEnabled = true
-        
         addSubview(innerView)
-        
-        // Configure label
+
         countLabel.font = .boldSystemFont(ofSize: 14)
-        countLabel.textColor = .black
+        countLabel.textColor = marker.type == .counter ? uiTextColorForMarker() : .white
         countLabel.textAlignment = .center
         countLabel.frame = innerView.bounds
-        
         innerView.addSubview(countLabel)
     }
-    
-    private func setupSVGBackground() {
-        guard let url = Bundle.main.url(forResource: "markerShape", withExtension: "svg"),
-              let svgData = try? Data(contentsOf: url),
-              let svgString = String(data: svgData, encoding: .utf8) else {
-            print("⚠️ markerShape.svg not found in bundle - using fallback appearance")
-            return
-        }
-        
-        // Parse SVG to extract path data
-        guard let pathData = extractSVGPathData(from: svgString) else {
-            print("⚠️ No valid path found in markerShape.svg")
-            return
-        }
-        
-        // Convert SVG path data to UIBezierPath
-        guard let bezierPath = UIBezierPath(svgPath: pathData) else {
-            print("⚠️ Failed to parse SVG path data")
-            return
-        }
-        
-        // Get original SVG bounds
-        let originalBounds = bezierPath.bounds
-        
-        // Resize frame to match SVG aspect ratio
-        let svgSize = originalBounds.size
-        self.frame = CGRect(x: 0, y: 0, width: svgSize.width, height: svgSize.height)
-        
-        // Create shape layer with SVG path
-        let shapeLayer = CAShapeLayer()
-        shapeLayer.path = bezierPath.cgPath
-        shapeLayer.fillColor = UIColor.systemYellow.cgColor  // Default fill
-        shapeLayer.strokeColor = UIColor.clear.cgColor
-        
-        // Add shadow to shape layer
-        shapeLayer.shadowColor = UIColor.black.cgColor
-        shapeLayer.shadowOpacity = 0.2
-        shapeLayer.shadowOffset = CGSize(width: 0, height: 2)
-        shapeLayer.shadowRadius = 4
-        
-        // Add to view
-        self.layer.insertSublayer(shapeLayer, at: 0)
-        self.svgShapeLayer = shapeLayer
-        
-        // Update innerView to match SVG size
-        innerView.frame = CGRect(x: 0, y: 0, width: svgSize.width, height: svgSize.height)
-        
-        print("✅ SVG background loaded successfully: \(svgSize)")
-    }
-    
-    private func extractSVGPathData(from svgString: String) -> String? {
-        // Simple regex to extract d="..." from first <path> element
-        guard let regex = try? NSRegularExpression(pattern: "<path[^>]*\\sd=\"([^\"]+)\"", options: []),
-              let match = regex.firstMatch(in: svgString, range: NSRange(svgString.startIndex..., in: svgString)) else {
-            return nil
-        }
-        
-        let nsString = svgString as NSString
-        return nsString.substring(with: match.range(at: 1))
+
+    /// Builds the label-shaped counter badge:
+    /// rounded TL / TR / BR corners (radius = height/2); sharp BL corner.
+    private func setupCounterShape() {
+        let W: CGFloat = 52
+        let H: CGFloat = 28
+        let R: CGFloat = H / 2   // = 14 — makes left & right ends fully rounded
+
+        self.frame    = CGRect(x: 0, y: 0, width: W, height: H)
+        innerView.frame = CGRect(x: 0, y: 0, width: W, height: H)
+
+        // Path in UIKit coordinates (Y increases downward)
+        //
+        //   TL arc ─── top edge ─── TR arc
+        //   │                          │
+        //   left                   BR arc
+        //   │                          │
+        //   BL ──────── bottom edge ───┘
+        //   (sharp)
+        let path = UIBezierPath()
+        path.move(to: CGPoint(x: 0, y: H))                          // BL — sharp
+        path.addLine(to: CGPoint(x: 0, y: R))                       // left edge up
+        path.addArc(withCenter: CGPoint(x: R, y: R),                // TL arc
+                    radius: R, startAngle: .pi, endAngle: -.pi / 2, clockwise: true)
+        path.addLine(to: CGPoint(x: W - R, y: 0))                   // top edge
+        path.addArc(withCenter: CGPoint(x: W - R, y: R),            // TR arc
+                    radius: R, startAngle: -.pi / 2, endAngle: 0, clockwise: true)
+        path.addLine(to: CGPoint(x: W, y: H - R))                   // right edge down
+        path.addArc(withCenter: CGPoint(x: W - R, y: H - R),        // BR arc
+                    radius: R, startAngle: 0, endAngle: .pi / 2, clockwise: true)
+        path.addLine(to: CGPoint(x: 0, y: H))                       // bottom edge
+        path.close()
+
+        let sl = CAShapeLayer()
+        sl.path        = path.cgPath
+        sl.fillColor   = uiColorForMarker().cgColor
+        sl.shadowColor  = UIColor.black.cgColor
+        sl.shadowOpacity = 0.22
+        sl.shadowOffset  = CGSize(width: 0, height: 2)
+        sl.shadowRadius  = 4
+        sl.shadowPath    = path.cgPath   // explicit path = crisp shadow
+
+        self.layer.insertSublayer(sl, at: 0)
+        self.shapeLayer = sl
     }
     
     private func setupGestures() {
-        tapGesture = UITapGestureRecognizer(target: self, action: #selector(handleTap))
-        if let tapGesture = tapGesture {
-            addGestureRecognizer(tapGesture)
+        // Counter badges are drag-only — counting happens in the toolbar panel
+        if marker.type != .counter {
+            tapGesture = UITapGestureRecognizer(target: self, action: #selector(handleTap))
+            if let tapGesture = tapGesture {
+                addGestureRecognizer(tapGesture)
+            }
         }
-        
+
         let panGesture = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
         addGestureRecognizer(panGesture)
-        
+
         let longPressGesture = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
         longPressGesture.minimumPressDuration = 0.6
         addGestureRecognizer(longPressGesture)
-        
+
         // Pan should require long press to fail
         panGesture.require(toFail: longPressGesture)
+    }
+
+    private func uiColorForMarker() -> UIColor {
+        switch marker.color {
+        case "sage":       return UIColor(red: 0.48, green: 0.68, blue: 0.56, alpha: 1)
+        case "mauve":      return UIColor(red: 0.75, green: 0.52, blue: 0.66, alpha: 1)
+        case "terracotta": return UIColor(red: 0.83, green: 0.45, blue: 0.35, alpha: 1)
+        case "steel":      return UIColor(red: 0.42, green: 0.61, blue: 0.75, alpha: 1)
+        case "gold":       return UIColor(red: 0.83, green: 0.66, blue: 0.26, alpha: 1)
+        case "lavender":   return UIColor(red: 0.61, green: 0.56, blue: 0.77, alpha: 1)
+        case "forest":     return UIColor(red: 0.42, green: 0.56, blue: 0.37, alpha: 1)
+        case "rose":       return UIColor(red: 0.91, green: 0.65, blue: 0.65, alpha: 1)
+        case "slate":      return UIColor(red: 0.48, green: 0.56, blue: 0.65, alpha: 1)
+        case "amber":      return UIColor(red: 0.79, green: 0.42, blue: 0.18, alpha: 1)
+        case "plum":       return UIColor(red: 0.48, green: 0.31, blue: 0.45, alpha: 1)
+        case "linen":      return UIColor(red: 0.78, green: 0.72, blue: 0.60, alpha: 1)
+        default:           return UIColor(red: 0.48, green: 0.68, blue: 0.56, alpha: 1)
+        }
+    }
+
+    /// Returns black or white — whichever gives higher WCAG contrast against the badge fill.
+    private func uiTextColorForMarker() -> UIColor {
+        // Pre-computed from WCAG relative luminance — only plum (L≈0.13) needs white text.
+        switch marker.color {
+        case "plum": return .white
+        default:     return .black
+        }
     }
     
     @objc private func handleTap() {
@@ -1300,11 +1351,9 @@ class SimpleMarkerView: UIView {
         
         // Animate color change
         UIView.animate(withDuration: 0.3) {
-            if let svgLayer = self.svgShapeLayer {
-                // Change SVG fill to green
-                svgLayer.fillColor = UIColor.systemGreen.cgColor
+            if let sl = self.shapeLayer {
+                sl.fillColor = UIColor.systemGreen.cgColor
             } else {
-                // Fallback: change innerView background
                 self.innerView.backgroundColor = .systemGreen
             }
         }
@@ -1325,168 +1374,83 @@ class SimpleMarkerView: UIView {
     }
     
     private func updateAppearance() {
+        let markerColor = uiColorForMarker()
         if marker.type == .counter {
-            if marker.currentCount >= target {
-                // Complete state
-                if let svgLayer = svgShapeLayer {
-                    svgLayer.fillColor = UIColor.systemGreen.cgColor
-                } else {
-                    innerView.backgroundColor = .systemGreen
-                }
-                
+            if target > 0 && marker.currentCount >= target {
+                // Complete — fill shape with marker color, show checkmark
+                shapeLayer?.fillColor = markerColor.cgColor
                 countLabel.removeFromSuperview()
-                
                 let checkmark = UIImageView(image: UIImage(systemName: "checkmark"))
                 checkmark.tintColor = .white
                 checkmark.contentMode = .scaleAspectFit
-                checkmark.frame = innerView.bounds.insetBy(dx: 8, dy: 8)
+                checkmark.frame = innerView.bounds.insetBy(dx: 6, dy: 6)
                 innerView.addSubview(checkmark)
                 checkmarkImageView = checkmark
-                
-                // Remove tap gesture if complete
-                if let tapGesture = tapGesture {
-                    removeGestureRecognizer(tapGesture)
-                    self.tapGesture = nil
-                }
             } else {
-                // Incomplete state
-                if let svgLayer = svgShapeLayer {
-                    svgLayer.fillColor = UIColor.systemYellow.cgColor
-                } else {
-                    innerView.backgroundColor = .systemYellow
-                }
+                // Counting — fill with marker's assigned color
+                shapeLayer?.fillColor = markerColor.cgColor
                 updateLabel()
             }
         } else {
-            // Note type - keep original appearance (no SVG)
             innerView.backgroundColor = .systemOrange
             updateLabel()
         }
     }
-    
+
     private func updateLabel() {
         if marker.type == .counter {
-            countLabel.text = "\(marker.currentCount)/\(target)"
+            countLabel.text = target > 0 ? "\(marker.currentCount)/\(target)" : "\(marker.currentCount)"
         } else {
             countLabel.text = "📌"
         }
     }
-    
+
     private func flashFeedback() {
-        UIView.animate(withDuration: 0.15, animations: {
-            if let svgLayer = self.svgShapeLayer {
-                svgLayer.fillColor = UIColor.systemGreen.cgColor
-            } else {
-                self.innerView.backgroundColor = .systemGreen
-            }
-        }) { _ in
-            UIView.animate(withDuration: 0.3) {
-                // Restore to yellow (not complete yet)
-                if let svgLayer = self.svgShapeLayer {
-                    svgLayer.fillColor = UIColor.systemYellow.cgColor
-                } else {
-                    self.innerView.backgroundColor = .systemYellow
-                }
-            }
-        }
+        // No-op — counter no longer increments from badge tap
     }
-    
+
     func updateCount() {
         updateLabel()
     }
-}
 
-// MARK: - UIBezierPath SVG Extension
+    /// Called from the coordinator when the marker's color changes in the edit sheet
+    func refreshAppearance() {
+        let color = uiColorForMarker()
+        if let sl = shapeLayer {
+            sl.fillColor = color.cgColor
+        } else {
+            innerView.backgroundColor = color
+        }
+        countLabel.textColor = uiTextColorForMarker()
+    }
 
-extension UIBezierPath {
-    /// Create a UIBezierPath from SVG path data string
-    /// Supports basic SVG commands: M, L, C, Q, H, V, Z
-    convenience init?(svgPath: String) {
-        self.init()
-        
-        var currentPoint = CGPoint.zero
-        var startPoint = CGPoint.zero
-        
-        // Parse path data - split by command letters
-        let scanner = Scanner(string: svgPath)
-        scanner.charactersToBeSkipped = CharacterSet.whitespacesAndNewlines
-        
-        while !scanner.isAtEnd {
-            // Try to scan a command letter
-            var commandChar: NSString?
-            if scanner.scanCharacters(from: CharacterSet.letters, into: &commandChar),
-               let command = commandChar as String?, let firstChar = command.first {
-                
-                switch firstChar {
-                case "M": // Move to
-                    if let x = scanNumber(scanner), let y = scanNumber(scanner) {
-                        let point = CGPoint(x: x, y: y)
-                        move(to: point)
-                        currentPoint = point
-                        startPoint = point
-                    }
-                    
-                case "L": // Line to
-                    if let x = scanNumber(scanner), let y = scanNumber(scanner) {
-                        let point = CGPoint(x: x, y: y)
-                        addLine(to: point)
-                        currentPoint = point
-                    }
-                    
-                case "H": // Horizontal line
-                    if let x = scanNumber(scanner) {
-                        let point = CGPoint(x: x, y: currentPoint.y)
-                        addLine(to: point)
-                        currentPoint = point
-                    }
-                    
-                case "V": // Vertical line
-                    if let y = scanNumber(scanner) {
-                        let point = CGPoint(x: currentPoint.x, y: y)
-                        addLine(to: point)
-                        currentPoint = point
-                    }
-                    
-                case "C": // Cubic bezier
-                    if let cp1x = scanNumber(scanner), let cp1y = scanNumber(scanner),
-                       let cp2x = scanNumber(scanner), let cp2y = scanNumber(scanner),
-                       let endx = scanNumber(scanner), let endy = scanNumber(scanner) {
-                        let cp1 = CGPoint(x: cp1x, y: cp1y)
-                        let cp2 = CGPoint(x: cp2x, y: cp2y)
-                        let end = CGPoint(x: endx, y: endy)
-                        addCurve(to: end, controlPoint1: cp1, controlPoint2: cp2)
-                        currentPoint = end
-                    }
-                    
-                case "Q": // Quadratic bezier
-                    if let cpx = scanNumber(scanner), let cpy = scanNumber(scanner),
-                       let endx = scanNumber(scanner), let endy = scanNumber(scanner) {
-                        let cp = CGPoint(x: cpx, y: cpy)
-                        let end = CGPoint(x: endx, y: endy)
-                        addQuadCurve(to: end, controlPoint: cp)
-                        currentPoint = end
-                    }
-                    
-                case "Z", "z": // Close path
-                    close()
-                    currentPoint = startPoint
-                    
-                default:
-                    break
+    /// Called from the coordinator when count or target changes in the toolbar panel.
+    /// Instantly transitions to/from checkmark state so no move is needed.
+    func refreshCount(_ count: Int, target: Int) {
+        self.target = target   // keep local copy in sync
+
+        if target > 0 && count >= target {
+            // ── Complete state ──
+            guard checkmarkImageView == nil else { return }  // already showing
+            countLabel.removeFromSuperview()
+            let checkmark = UIImageView(image: UIImage(systemName: "checkmark"))
+            checkmark.tintColor = .white
+            checkmark.contentMode = .scaleAspectFit
+            checkmark.frame = innerView.bounds.insetBy(dx: 6, dy: 6)
+            innerView.addSubview(checkmark)
+            checkmarkImageView = checkmark
+        } else {
+            // ── Counting state ── (also handles decrement back below target)
+            if checkmarkImageView != nil {
+                checkmarkImageView?.removeFromSuperview()
+                checkmarkImageView = nil
+                if countLabel.superview == nil {
+                    innerView.addSubview(countLabel)
+                    countLabel.frame = innerView.bounds
                 }
             }
+            countLabel.text = target > 0 ? "\(count)/\(target)" : "\(count)"
         }
-    }
-    
-    private func scanNumber(_ scanner: Scanner) -> CGFloat? {
-        // Skip commas and whitespace
-        scanner.charactersToBeSkipped = CharacterSet(charactersIn: ", \t\n")
-        
-        var value: Double = 0
-        if scanner.scanDouble(&value) {
-            return CGFloat(value)
-        }
-        return nil
     }
 }
 
