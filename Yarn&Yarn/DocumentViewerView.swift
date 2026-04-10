@@ -28,13 +28,14 @@ struct DocumentViewerView: View {
     @State private var visibleCounterIDs: Set<UUID> = []
 
     private var counterMarkers: [Marker] {
-        let all = document.markers
+        document.markers
             .filter { $0.type == .counter }
             .sorted { $0.createdDate < $1.createdDate }
-        // Show only counters whose badge is currently visible in the PDF viewport.
-        // Fall back to all counters on first load before the viewport has reported.
-        guard !visibleCounterIDs.isEmpty else { return all }
-        return all.filter { visibleCounterIDs.contains($0.id) }
+            .filter { visibleCounterIDs.contains($0.id) }
+    }
+
+    private var hasAnyCounters: Bool {
+        document.markers.contains { $0.type == .counter }
     }
     
     var body: some View {
@@ -58,16 +59,20 @@ struct DocumentViewerView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if !showingTextReader {
                 VStack(spacing: 0) {
-                    if showingCounterPanel && !counterMarkers.isEmpty {
+                    if showingCounterPanel && hasAnyCounters {
                         Divider()
                         CounterPanelView(
                             counters: counterMarkers,
-                            onEdit: { counterToEdit = $0 }
+                            onEdit: { counterToEdit = $0 },
+                            onDelete: { marker in
+                                modelContext.delete(marker)
+                                try? modelContext.save()
+                            }
                         )
                     }
                     DocumentToolbarBar(
                         showingPanel: $showingCounterPanel,
-                        hasCounters: !counterMarkers.isEmpty,
+                        hasCounters: hasAnyCounters,
                         onAddCounter: addCounter,
                         onGlossaryTap: { /* TODO: glossary */ }
                     )
@@ -981,18 +986,6 @@ struct DocumentToolbarBar: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            if hasCounters {
-                Button {
-                    withAnimation(.spring(response: 0.3)) { showingPanel.toggle() }
-                } label: {
-                    Image(systemName: showingPanel ? "chevron.down" : "chevron.up")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 28, height: 28)
-                }
-                .buttonStyle(.plain)
-            }
-
             Button(action: onGlossaryTap) {
                 Label("glossary", systemImage: "magnifyingglass")
                     .font(.subheadline)
@@ -1014,6 +1007,18 @@ struct DocumentToolbarBar: View {
             .buttonStyle(.plain)
 
             Spacer()
+
+            if hasCounters {
+                Button {
+                    withAnimation(.spring(response: 0.3)) { showingPanel.toggle() }
+                } label: {
+                    Image(systemName: showingPanel ? "chevron.down" : "chevron.up")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -1025,6 +1030,7 @@ struct DocumentToolbarBar: View {
 struct CounterPanelView: View {
     let counters: [Marker]
     let onEdit: (Marker) -> Void
+    let onDelete: (Marker) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1036,15 +1042,27 @@ struct CounterPanelView: View {
                 .padding(.top, 12)
                 .padding(.bottom, 6)
 
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(spacing: 8) {
+            List {
+                if counters.isEmpty {
+                    Text("No counters in view")
+                        .font(.subheadline)
+                        .foregroundStyle(.tertiary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                } else {
                     ForEach(counters) { counter in
                         CounterRowView(counter: counter, onEdit: { onEdit(counter) })
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                            .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
+                    }
+                    .onDelete { indices in
+                        for index in indices { onDelete(counters[index]) }
                     }
                 }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 12)
             }
+            .listStyle(.plain)
             .frame(maxHeight: 220)
         }
     }
