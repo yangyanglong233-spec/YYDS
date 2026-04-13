@@ -14,6 +14,7 @@ struct Yarn_YarnApp: App {
         let schema = Schema([
             InstructionDocument.self,
             Marker.self,
+            KnittingProject.self,
         ])
         
         // Persist data to disk so imported files and markers are saved

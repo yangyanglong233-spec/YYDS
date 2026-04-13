@@ -8,15 +8,38 @@
 import SwiftUI
 import PDFKit
 import SwiftData
+import Combine
+
+// MARK: - Lens Bridge
+
+/// Reference-type bridge so the UIKit coordinator can vend a query closure to SwiftUI.
+/// `queryTermsAt` is set once in `makeUIView`; SwiftUI calls it whenever the lens moves.
+final class LensBridge: ObservableObject {
+    /// Set once in makeUIView; called with center in UIKit window coordinates.
+    var queryTermsAt: ((CGPoint, CGFloat) -> [(KnittingGlossary.Term, CGRect)])?
+    /// Set by SwiftUI via onGeometryChange; the global (window) origin of the lens GeometryReader.
+    var lensOriginInWindow: CGPoint = .zero
+}
+
+// MARK: - Term Position
+
+/// Lightweight record of where a knitting term appears on a PDF page.
+/// Stored only in coordinator memory — never written to SwiftData.
+struct TermPosition {
+    let term: KnittingGlossary.Term
+    let pageNumber: Int
+    let normalizedRect: CGRect   // origin and size as fractions of the page mediaBox
+}
 
 /// A native SwiftUI-based PDF reader with full control over interactions
 /// This uses PDFKit's PDFView for reliable zoom and scroll
 struct NativePDFReaderView: View {
     let pdfDocument: PDFDocument
     @Bindable var document: InstructionDocument
-    let highlightingEnabled: Bool
+    let lensBridge: LensBridge
     @Binding var currentPage: Int
     var visibleCounterIDs: Binding<Set<UUID>>
+    var viewportCenter: Binding<CGPoint>
 
     @State private var selectedTerm: KnittingGlossary.Term?
     @State private var showingTermDetail = false
@@ -63,13 +86,14 @@ struct NativePDFReaderView: View {
                 instructionDocument: document,
                 currentPage: $currentPage,
                 scale: $pdfViewScale,
-                highlightingEnabled: highlightingEnabled,
+                lensBridge: lensBridge,
                 selectedTerm: $selectedTerm,
                 showingTermDetail: $showingTermDetail,
                 isLoadingTerm: $isLoadingTerm,
                 selectedMarker: $selectedMarker,
                 showingMarkerPopup: $showingMarkerPopup,
-                visibleCounterIDs: visibleCounterIDs
+                visibleCounterIDs: visibleCounterIDs,
+                viewportCenter: viewportCenter
             )
             .id(pdfDocument) // Prevent recreation unless document changes
             .overlay(alignment: .center) {
@@ -116,16 +140,17 @@ struct NativePDFKitView: UIViewRepresentable {
     let instructionDocument: InstructionDocument
     @Binding var currentPage: Int
     @Binding var scale: CGFloat
-    let highlightingEnabled: Bool
+    let lensBridge: LensBridge
     @Binding var selectedTerm: KnittingGlossary.Term?
     @Binding var showingTermDetail: Bool
     @Binding var isLoadingTerm: Bool
     @Binding var selectedMarker: Marker?
     @Binding var showingMarkerPopup: Bool
     var visibleCounterIDs: Binding<Set<UUID>>
+    var viewportCenter: Binding<CGPoint>
 
     @Environment(\.modelContext) private var modelContext
-    
+
     func makeUIView(context: Context) -> UIView {
         // Create container view
         let containerView = UIView()
@@ -142,7 +167,11 @@ struct NativePDFKitView: UIViewRepresentable {
         
         // Enable interaction with annotations
         pdfView.isUserInteractionEnabled = true
-        
+
+        // Allow PDFView's built-in pinch-to-zoom and scroll recognizers to fire even when
+        // a SwiftUI gesture overlay (.simultaneousGesture on the lens) is also active.
+        pdfView.gestureRecognizers?.forEach { $0.cancelsTouchesInView = false }
+
         // Add tap gesture to detect clicks on highlights (since PDFKit doesn't always trigger delegate for highlights)
         let tapGesture = UITapGestureRecognizer(target: context.coordinator, action: #selector(context.coordinator.handleTap(_:)))
         tapGesture.delegate = context.coordinator
@@ -181,16 +210,21 @@ struct NativePDFKitView: UIViewRepresentable {
         context.coordinator.isLoadingTerm = $isLoadingTerm
         context.coordinator.selectedMarker = $selectedMarker
         context.coordinator.showingMarkerPopup = $showingMarkerPopup
+        context.coordinator.visibleCounterIDsBinding = visibleCounterIDs
+        context.coordinator.viewportCenterBinding = viewportCenter
         
         // Set initial page
         if let page = document.page(at: currentPage) {
             pdfView.go(to: page)
         }
         
-        // Add highlights if enabled
-        if highlightingEnabled {
-            context.coordinator.addHighlights(page: currentPage)
+        // Wire up lens bridge
+        lensBridge.queryTermsAt = { [weak coordinator = context.coordinator] center, radius in
+            coordinator?.termsInLens(center: center, radius: radius) ?? []
         }
+        
+        // Add highlights
+        context.coordinator.addHighlights(page: currentPage)
         
         // Setup continuous tracking with CADisplayLink
         context.coordinator.setupContinuousTracking()
@@ -206,9 +240,7 @@ struct NativePDFKitView: UIViewRepresentable {
             context.coordinator.updateCurrentPage(index)
             
             // Update highlights for new page
-            if context.coordinator.highlightingEnabled {
-                context.coordinator.addHighlights(page: index)
-            }
+            context.coordinator.addHighlights(page: index)
             
             // Update markers for all pages (vertical scroll shows markers across pages)
             context.coordinator.rebuildMarkerViews(markers: context.coordinator.instructionDocument.markers)
@@ -242,9 +274,8 @@ struct NativePDFKitView: UIViewRepresentable {
         context.coordinator.selectedMarker = $selectedMarker
         context.coordinator.showingMarkerPopup = $showingMarkerPopup
         context.coordinator.visibleCounterIDsBinding = visibleCounterIDs
+        context.coordinator.viewportCenterBinding = viewportCenter
         
-        let oldHighlightingEnabled = context.coordinator.highlightingEnabled
-        context.coordinator.highlightingEnabled = highlightingEnabled
         context.coordinator.instructionDocument = instructionDocument
         
         // Update to new page if changed externally
@@ -254,10 +285,9 @@ struct NativePDFKitView: UIViewRepresentable {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 if let page = pdfView.currentPage {
                     let index = self.document.index(for: page)
-                    if self.highlightingEnabled {
-                        context.coordinator.addHighlights(page: index)
-                    }
+                    context.coordinator.addHighlights(page: index)
                     context.coordinator.rebuildMarkerViews(markers: self.instructionDocument.markers)
+                    context.coordinator.repositionMarkerViews()
                 }
             }
             return
@@ -268,20 +298,10 @@ struct NativePDFKitView: UIViewRepresentable {
         // whenever updateUIView is called (e.g. on scale binding updates).
         // Page tracking is handled exclusively by the PDFViewPageChanged notification.
         
-        // Only update highlights if the highlighting state changed
-        if highlightingEnabled != oldHighlightingEnabled {
-            if highlightingEnabled {
-                context.coordinator.addHighlights(page: currentPage)
-            } else {
-                context.coordinator.removeHighlights()
-            }
-        }
-        
         // Check if any markers across all pages have changed
         let allMarkers = instructionDocument.markers
         let incomingIDs = Set(allMarkers.map { $0.id })
-        // Combine both marker views and highlight layers for accurate change detection
-        let existingIDs = Set(context.coordinator.markerViewMap.keys).union(Set(context.coordinator.highlightLayerMap.keys))
+        let existingIDs = Set(context.coordinator.markerViewMap.keys)
 
         let shouldRebuild = incomingIDs != existingIDs
         print("🟡 updateUIView called - will rebuild: \(shouldRebuild)")
@@ -295,6 +315,9 @@ struct NativePDFKitView: UIViewRepresentable {
             context.coordinator.refreshCountLabels(markers: allMarkers)
             context.coordinator.repositionMarkerViews()
         }
+
+        // Suppress unused variable warning
+        _ = currentPDFPage
     }
     
     func makeCoordinator() -> Coordinator {
@@ -319,17 +342,14 @@ struct NativePDFKitView: UIViewRepresentable {
         weak var overlayView: UIView?
         let document: PDFDocument
         var instructionDocument: InstructionDocument
-        var highlightingEnabled = false
         let modelContext: ModelContext
-        private var currentHighlightAnnotations: [TermHighlightAnnotation] = []
-        private weak var selectedHighlightAnnotation: TermHighlightAnnotation?
+        
+        // Term positions stored in memory only
+        var termPositions: [TermPosition] = []
         
         // Marker views keyed by marker ID for efficient repositioning
         var markerViewMap: [UUID: SimpleMarkerView] = [:]
         private var currentMarkers: [Marker] = []
-        
-        // Highlight shape layers keyed by marker ID
-        var highlightLayerMap: [UUID: CAShapeLayer] = [:]
         
         // CADisplayLink for continuous tracking
         private var displayLink: CADisplayLink?
@@ -341,6 +361,10 @@ struct NativePDFKitView: UIViewRepresentable {
         // Visible counter tracking — pushed to SwiftUI via binding when the set changes
         var visibleCounterIDsBinding: Binding<Set<UUID>>?
         var lastVisibleCounterIDs: Set<UUID> = []
+
+        // Viewport center — normalized (0-1) coords on the current page, updated each frame
+        var viewportCenterBinding: Binding<CGPoint>?
+        private var lastViewportCenter: CGPoint = CGPoint(x: 0.5, y: 0.5)
         
         // Keep a strong reference to the haptic generator
         private let impactGenerator = UIImpactFeedbackGenerator(style: .medium)
@@ -385,7 +409,7 @@ struct NativePDFKitView: UIViewRepresentable {
         func rebuildMarkerViews(markers: [Marker]) {
             print("🔴 rebuildMarkerViews called")
             guard let overlayView = overlayView,
-                  let pdfView = pdfView else {
+                  pdfView != nil else {
                 print("DEBUG: Cannot rebuild markers - overlayView or pdfView is nil")
                 return
             }
@@ -397,12 +421,6 @@ struct NativePDFKitView: UIViewRepresentable {
                 markerView.removeFromSuperview()
             }
             markerViewMap.removeAll()
-            
-            // Remove all existing highlight layers
-            for (_, layer) in highlightLayerMap {
-                layer.removeFromSuperlayer()
-            }
-            highlightLayerMap.removeAll()
             
             // Store current markers
             currentMarkers = markers
@@ -419,7 +437,7 @@ struct NativePDFKitView: UIViewRepresentable {
             
             // Create new marker views
             for marker in markers {
-                // Skip highlight markers - they use CAShapeLayer, not UIView
+                // Skip highlight markers - they are now handled via termPositions only
                 if marker.type == .highlight {
                     continue
                 }
@@ -524,73 +542,6 @@ struct NativePDFKitView: UIViewRepresentable {
                 markerViewMap[marker.id] = markerView
             }
             
-            // Create highlight layers
-            for marker in markers {
-                // Only process highlight markers
-                guard marker.type == .highlight,
-                      let pageRect = marker.pageRect,
-                      let page = pdfView.document?.page(at: marker.pageNumber) else {
-                    continue
-                }
-                
-                // Convert normalized pageRect (0-1) to PDF page coordinates
-                let pageBounds = page.bounds(for: .mediaBox)
-                let pdfRect = CGRect(
-                    x: pageRect.origin.x * pageBounds.width,
-                    y: pageRect.origin.y * pageBounds.height,
-                    width: pageRect.width * pageBounds.width,
-                    height: pageRect.height * pageBounds.height
-                )
-                
-                // Convert PDF rect to screen coordinates
-                let rectInPDFView = pdfView.convert(pdfRect, from: page)
-                
-                // Convert from PDFView space to overlay space
-                guard let containerView = overlayView.superview else { continue }
-                let rectInContainer = pdfView.convert(rectInPDFView, to: containerView)
-                let rectInOverlay = overlayView.convert(rectInContainer, from: containerView)
-                
-                // Determine style and generate path
-                let highlightStyle = marker.highlightStyle ?? .yarnLoop  // Default to yarnLoop if nil
-                
-                // Compute scale factor from rendered text height
-                let referenceLineHeight: CGFloat = 14.0
-                let scale = rectInOverlay.height / referenceLineHeight
-                
-                let path: UIBezierPath
-                switch highlightStyle {
-                case .yarnLoop:
-                    path = HighlightPathRenderer.yarnLoopPath(width: rectInOverlay.width, scale: scale)
-                case .scallop:
-                    path = HighlightPathRenderer.scallopPath(width: rectInOverlay.width, scale: scale)
-                }
-                
-                // Translate path to position
-                let gap: CGFloat = 1 * scale  // Adjusted: closer to text (less overlap)
-                let translation = CGAffineTransform(translationX: rectInOverlay.minX, y: rectInOverlay.maxY + gap)
-                path.apply(translation)
-                
-                // Create shape layer
-                let shapeLayer = CAShapeLayer()
-                shapeLayer.path = path.cgPath
-                shapeLayer.fillColor = UIColor.clear.cgColor
-                shapeLayer.lineWidth = min(max(2.0 / scale, 0.5), 4.0)
-                
-                // Set stroke color based on style
-                switch highlightStyle {
-                case .yarnLoop:
-                    shapeLayer.strokeColor = UIColor(red: 0xFF/255.0, green: 0x8C/255.0, blue: 0x3E/255.0, alpha: 0.64).cgColor
-                case .scallop:
-                    shapeLayer.strokeColor = UIColor(red: 0xC0/255.0, green: 0x40/255.0, blue: 0x20/255.0, alpha: 0.7).cgColor
-                }
-                
-                // Add to overlay
-                overlayView.layer.addSublayer(shapeLayer)
-                
-                // Store in map
-                highlightLayerMap[marker.id] = shapeLayer
-            }
-            
             // Initial positioning
             repositionMarkerViews()
         }
@@ -613,9 +564,6 @@ struct NativePDFKitView: UIViewRepresentable {
         @objc func repositionMarkerViews() {
             guard let pdfView = pdfView,
                   let overlayView = overlayView else { return }
-
-            // Temporary log to verify continuous tracking
-            //print("⏱ tick — scale: \(pdfView.scaleFactor), markerCount: \(markerViewMap.count)")
 
             let scale = pdfView.scaleFactor
 
@@ -665,9 +613,6 @@ struct NativePDFKitView: UIViewRepresentable {
             }
 
             // Collect IDs of counter badges whose centre lies within the visible viewport.
-            // Exclude the area hidden behind the toolbar/counter panel:
-            // safeAreaInsets.bottom is updated by SwiftUI's .safeAreaInset modifier and
-            // equals the combined height of the toolbar + counter panel when open.
             let panelHeight = overlayView.safeAreaInsets.bottom
             let visibleRect = CGRect(
                 x: overlayView.bounds.minX,
@@ -688,55 +633,49 @@ struct NativePDFKitView: UIViewRepresentable {
                 visibleCounterIDsBinding?.wrappedValue = visibleIDs
             }
 
-            // Reposition highlight layers
-            for (id, shapeLayer) in highlightLayerMap {
-                guard let marker = currentMarkers.first(where: { $0.id == id }),
-                      marker.type == .highlight,
-                      let pageRect = marker.pageRect,
-                      let page = pdfView.document?.page(at: marker.pageNumber) else {
-                    continue
-                }
-                
-                // Convert normalized pageRect (0-1) to PDF page coordinates
+            // Track viewport center in normalized page coordinates for new counter placement
+            let viewCenter = CGPoint(x: pdfView.bounds.midX, y: pdfView.bounds.midY)
+            if let page = pdfView.page(for: viewCenter, nearest: true) {
+                let pointInPage = pdfView.convert(viewCenter, to: page)
                 let pageBounds = page.bounds(for: .mediaBox)
-                let pdfRect = CGRect(
-                    x: pageRect.origin.x * pageBounds.width,
-                    y: pageRect.origin.y * pageBounds.height,
-                    width: pageRect.width * pageBounds.width,
-                    height: pageRect.height * pageBounds.height
-                )
-                
-                // Convert PDF rect to screen coordinates
-                let rectInPDFView = pdfView.convert(pdfRect, from: page)
-                
-                // Convert from PDFView space to overlay space
-                guard let containerView = overlayView.superview else { continue }
-                let rectInContainer = pdfView.convert(rectInPDFView, to: containerView)
-                let rectInOverlay = overlayView.convert(rectInContainer, from: containerView)
-                
-                // Determine style and regenerate path with new width
-                let highlightStyle = marker.highlightStyle ?? .yarnLoop  // Default to yarnLoop if nil
-                
-                // Compute scale factor from rendered text height
-                let referenceLineHeight: CGFloat = 14.0
-                let scale = rectInOverlay.height / referenceLineHeight
-                
-                let path: UIBezierPath
-                switch highlightStyle {
-                case .yarnLoop:
-                    path = HighlightPathRenderer.yarnLoopPath(width: rectInOverlay.width, scale: scale)
-                case .scallop:
-                    path = HighlightPathRenderer.scallopPath(width: rectInOverlay.width, scale: scale)
+                let nx = max(0, min(1, Double(pointInPage.x / pageBounds.width)))
+                let ny = max(0, min(1, Double(pointInPage.y / pageBounds.height)))
+                let newCenter = CGPoint(x: nx, y: ny)
+                if abs(newCenter.x - lastViewportCenter.x) > 0.005 || abs(newCenter.y - lastViewportCenter.y) > 0.005 {
+                    lastViewportCenter = newCenter
+                    viewportCenterBinding?.wrappedValue = newCenter
                 }
-                
-                // Translate path to position
-                let gap: CGFloat = 1 * scale  // Adjusted: closer to text (less overlap)
-                let translation = CGAffineTransform(translationX: rectInOverlay.minX, y: rectInOverlay.maxY + gap)
-                path.apply(translation)
-                
-                // Update layer path
-                shapeLayer.path = path.cgPath
             }
+        }
+
+        // MARK: - Lens Query
+
+        /// center and returned rects are all in UIKit window coordinates so they align
+        /// with SwiftUI's .global coordinate space regardless of view hierarchy offsets
+        /// (e.g. the page-indicator VStack row above NativePDFKitView).
+        func termsInLens(center: CGPoint, radius: CGFloat) -> [(KnittingGlossary.Term, CGRect)] {
+            guard let pdfView = pdfView,
+                  let overlayView = overlayView,
+                  let window = overlayView.window else { return [] }
+            var result: [(KnittingGlossary.Term, CGRect)] = []
+            for item in termPositions {
+                guard let page = pdfView.document?.page(at: item.pageNumber) else { continue }
+                let pb = page.bounds(for: .mediaBox)
+                let pdfRect = CGRect(
+                    x: item.normalizedRect.minX * pb.width,
+                    y: item.normalizedRect.minY * pb.height,
+                    width: item.normalizedRect.width * pb.width,
+                    height: item.normalizedRect.height * pb.height
+                )
+                let inPDF = pdfView.convert(pdfRect, from: page)
+                let inWindow = pdfView.convert(inPDF, to: window)
+                let termCenter = CGPoint(x: inWindow.midX, y: inWindow.midY)
+                let dist = hypot(termCenter.x - center.x, termCenter.y - center.y)
+                if dist <= radius + max(inWindow.width, inWindow.height) / 2 {
+                    result.append((item.term, inWindow))
+                }
+            }
+            return result
         }
         
         // MARK: - Gesture Handling
@@ -763,50 +702,7 @@ struct NativePDFKitView: UIViewRepresentable {
             let locationInPage = pdfView.convert(locationInView, to: page)
             
             print("DEBUG: Tap at page coordinates: \(locationInPage)")
-            print("DEBUG: Current highlights count: \(currentHighlightAnnotations.count)")
-            
-            // Check highlights
-            for annotation in currentHighlightAnnotations {
-                if annotation.bounds.contains(locationInPage) {
-                    print("DEBUG: Tap on highlight detected - Term: \(annotation.term.abbreviation)")
-                    
-                    // Trigger haptic feedback immediately
-                    impactGenerator.impactOccurred()
-                    // Prepare for next tap
-                    impactGenerator.prepare()
-                    
-                    // Deselect previous annotation
-                    selectedHighlightAnnotation?.setSelected(false)
-                    
-                    // Select this annotation with press effect
-                    annotation.setSelected(true)
-                    selectedHighlightAnnotation = annotation
-                    
-                    // Show loading indicator
-                    isLoadingTerm?.wrappedValue = true
-                    
-                    // Set the term
-                    selectedTerm?.wrappedValue = annotation.term
-                    
-                    // Wait for state to propagate, then show sheet and hide loader
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                        self.isLoadingTerm?.wrappedValue = false
-                        self.showingTermDetail?.wrappedValue = true
-                    }
-                    
-                    // Deselect after a delay (visual feedback fades)
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        annotation.setSelected(false)
-                        if self.selectedHighlightAnnotation === annotation {
-                            self.selectedHighlightAnnotation = nil
-                        }
-                    }
-                    
-                    return
-                }
-            }
-            
-            print("DEBUG: Tap on empty area")
+            print("DEBUG: Tap on empty area or marker")
         }
         
         // MARK: - UIGestureRecognizerDelegate
@@ -828,254 +724,47 @@ struct NativePDFKitView: UIViewRepresentable {
         
         // This is called when user clicks on an annotation
         func pdfView(_ pdfView: PDFView, didClick annotation: PDFAnnotation) {
-            print("DEBUG: Annotation clicked - Type: \(type(of: annotation))")
-            
-            // Only handle term highlights (markers are now in overlay)
-            if let termAnnotation = annotation as? TermHighlightAnnotation {
-                print("DEBUG: Term annotation tapped - Term: \(termAnnotation.term.abbreviation)")
-                
-                // Trigger haptic feedback
-                impactGenerator.impactOccurred()
-                impactGenerator.prepare()
-                
-                selectedTerm?.wrappedValue = termAnnotation.term
-                showingTermDetail?.wrappedValue = true
-                return
-            }
-            
-            print("DEBUG: Unknown annotation type")
+            // Annotations are no longer used for interaction
         }
         
         // MARK: - Highlights
         
         func addHighlights(page pageIndex: Int) {
             guard let page = document.page(at: pageIndex),
-                  let pageText = page.string else {
-                print("DEBUG: Cannot add highlights - no page or text")
-                return
-            }
-            
-            print("DEBUG: Adding highlights for page \(pageIndex)")
-            
-            // First, remove ALL existing highlight annotations from this specific page
-            let existingAnnotations = page.annotations
-            for annotation in existingAnnotations {
-                if annotation is TermHighlightAnnotation {
-                    page.removeAnnotation(annotation)
-                }
-            }
-            
-            // Remove existing highlight markers for this page
-            let existingHighlightMarkers = instructionDocument.markers.filter {
-                $0.type == .highlight && $0.pageNumber == pageIndex
-            }
-            for marker in existingHighlightMarkers {
-                modelContext.delete(marker)
-            }
-            
-            // Clear our tracking array
-            currentHighlightAnnotations.removeAll()
-            
-            // Now add new highlights
+                  let pageText = page.string else { return }
+
+            // Remove term positions for this page (will be replaced)
+            termPositions.removeAll { $0.pageNumber == pageIndex }
+
             let foundTerms = KnittingGlossary.findTerms(in: pageText)
-            print("DEBUG: Found \(foundTerms.count) terms to highlight")
-            
-            // Get page bounds for normalization
             let pageBounds = page.bounds(for: .mediaBox)
-            
+
             for (term, range) in foundTerms {
                 let nsRange = NSRange(range, in: pageText)
-                
                 if let selection = page.selection(for: nsRange) {
                     let bounds = selection.bounds(for: page)
-                    
-                    // Create a clickable highlight annotation (for glossary tap interaction)
-                    let highlightAnnotation = TermHighlightAnnotation(bounds: bounds, term: term)
-                    highlightAnnotation.setBaseColor(UIColor(red: 1.0, green: 0.9, blue: 0.4, alpha: 0.6))
-                    // Make sure the annotation is interactive
-                    highlightAnnotation.isReadOnly = false
-                    
-                    page.addAnnotation(highlightAnnotation)
-                    currentHighlightAnnotations.append(highlightAnnotation)
-                    
-                    print("DEBUG: Added highlight for '\(term.abbreviation)' at bounds: \(bounds)")
-                    
-                    // Create a Marker object for decorative underline rendering
-                    // Normalize bounds to 0-1 coordinate space
                     let normalizedRect = CGRect(
                         x: bounds.origin.x / pageBounds.width,
                         y: bounds.origin.y / pageBounds.height,
                         width: bounds.width / pageBounds.width,
                         height: bounds.height / pageBounds.height
                     )
-                    
-                    let highlightMarker = Marker(
-                        type: .highlight,
-                        positionX: normalizedRect.origin.x,
-                        positionY: normalizedRect.origin.y,
+                    termPositions.append(TermPosition(
+                        term: term,
                         pageNumber: pageIndex,
-                        color: "purple"  // Use purple for yarnLoop style
-                    )
-                    highlightMarker.rectX = normalizedRect.origin.x
-                    highlightMarker.rectY = normalizedRect.origin.y
-                    highlightMarker.rectWidth = normalizedRect.width
-                    highlightMarker.rectHeight = normalizedRect.height
-                    highlightMarker.highlightStyle = .yarnLoop
-                    highlightMarker.document = instructionDocument
-                    
-                    // Insert into SwiftData
-                    modelContext.insert(highlightMarker)
+                        normalizedRect: normalizedRect
+                    ))
                 }
-            }
-            
-            // Save all new markers
-            try? modelContext.save()
-            
-            print("DEBUG: Total highlights added: \(currentHighlightAnnotations.count)")
-            
-            // Rebuild all marker views to render the new highlight layers immediately
-            rebuildMarkerViews(markers: instructionDocument.markers)
-            
-            // Show all highlight layers when highlights are enabled
-            for (_, layer) in highlightLayerMap {
-                layer.isHidden = false
             }
         }
         
         func removeHighlights() {
-            // Hide all highlight layers when highlights are disabled
-            for (_, layer) in highlightLayerMap {
-                layer.isHidden = true
-            }
-            
-            // Remove all highlight annotations from all pages
-            for pageIndex in 0..<document.pageCount {
-                if let page = document.page(at: pageIndex) {
-                    let existingAnnotations = page.annotations
-                    for annotation in existingAnnotations {
-                        if annotation is TermHighlightAnnotation {
-                            page.removeAnnotation(annotation)
-                        }
-                    }
-                }
-            }
-            
-            // Remove all highlight markers from all pages
-            let allHighlightMarkers = instructionDocument.markers.filter { $0.type == .highlight }
-            for marker in allHighlightMarkers {
-                modelContext.delete(marker)
-            }
+            termPositions.removeAll()
+            // Delete any legacy highlight Markers persisted to SwiftData
+            let old = instructionDocument.markers.filter { $0.type == .highlight }
+            for m in old { modelContext.delete(m) }
             try? modelContext.save()
-            
-            currentHighlightAnnotations.removeAll()
-            
-            // Rebuild all markers to remove highlight layers
-            rebuildMarkerViews(markers: instructionDocument.markers)
         }
-        
-        private func highlightColor(for category: KnittingGlossary.Category) -> UIColor {
-            switch category {
-            case .basicStitches:
-                return .systemYellow
-            case .increases, .decreases:
-                return .systemOrange
-            case .castOn, .bindOff:
-                return .systemGreen
-            case .cables:
-                return .systemPurple
-            case .colorwork:
-                return .systemPink
-            case .lace:
-                return .systemCyan
-            default:
-                return .systemBlue
-            }
-        }
-    }
-}
-
-// MARK: - Term Highlight Annotation
-
-class TermHighlightAnnotation: PDFAnnotation {
-    let term: KnittingGlossary.Term
-    private var isSelected: Bool = false
-    private var baseColor: UIColor = .clear
-    
-    init(bounds: CGRect, term: KnittingGlossary.Term) {
-        self.term = term
-        super.init(bounds: bounds, forType: .highlight, withProperties: nil)
-    }
-    
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-    
-    func setSelected(_ selected: Bool, animated: Bool = true) {
-        guard isSelected != selected else { return }
-        isSelected = selected
-        
-        if animated {
-            // Animate the color change
-            UIView.animate(withDuration: 0.15, delay: 0, options: [.curveEaseOut]) {
-                self.updateAppearance()
-            }
-        } else {
-            updateAppearance()
-        }
-    }
-    
-    private func updateAppearance() {
-        if isSelected {
-            // Pressed state - darker and more opaque
-            self.color = baseColor.withAlphaComponent(0.7)
-        } else {
-            // Normal state
-            self.color = baseColor.withAlphaComponent(0.3)
-        }
-    }
-    
-    func setBaseColor(_ color: UIColor) {
-        self.baseColor = color
-        self.color = color.withAlphaComponent(0.3)
-    }
-    
-    override func draw(with box: PDFDisplayBox, in context: CGContext) {
-        // Custom drawing for rounded rectangle highlight with enhanced visual polish
-        context.saveGState()
-        
-        // More prominent corner radius for better visual appeal
-        let cornerRadius: CGFloat = 6
-        let insetBounds = self.bounds.insetBy(dx: 0.5, dy: 0.5)
-        
-        // Create rounded rectangle path
-        let path = UIBezierPath(roundedRect: insetBounds, cornerRadius: cornerRadius)
-        
-        // Fill with highlight color
-        let fillColor = self.color ?? baseColor.withAlphaComponent(0.3)
-        context.setFillColor(fillColor.cgColor)
-        context.addPath(path.cgPath)
-        context.fillPath()
-        
-        // Add border when pressed
-        if isSelected {
-            let borderColor = baseColor.withAlphaComponent(1.0)
-            context.setStrokeColor(borderColor.cgColor)
-            context.setLineWidth(2.5) // Slightly thicker for better visibility
-            
-            // Recreate path for stroke (since we already filled)
-            let strokePath = UIBezierPath(roundedRect: insetBounds, cornerRadius: cornerRadius)
-            context.addPath(strokePath.cgPath)
-            context.strokePath()
-            
-            // Add subtle shadow for depth when selected
-            context.setShadow(
-                offset: CGSize(width: 0, height: 2),
-                blur: 4,
-                color: borderColor.withAlphaComponent(0.5).cgColor
-            )
-        }
-        
-        context.restoreGState()
     }
 }
 
@@ -1168,13 +857,6 @@ class SimpleMarkerView: UIView {
         innerView.frame = CGRect(x: 0, y: 0, width: W, height: H)
 
         // Path in UIKit coordinates (Y increases downward)
-        //
-        //   TL arc ─── top edge ─── TR arc
-        //   │                          │
-        //   left                   BR arc
-        //   │                          │
-        //   BL ──────── bottom edge ───┘
-        //   (sharp)
         let path = UIBezierPath()
         path.move(to: CGPoint(x: 0, y: H))                          // BL — sharp
         path.addLine(to: CGPoint(x: 0, y: R))                       // left edge up
@@ -1242,7 +924,6 @@ class SimpleMarkerView: UIView {
 
     /// Returns black or white — whichever gives higher WCAG contrast against the badge fill.
     private func uiTextColorForMarker() -> UIColor {
-        // Pre-computed from WCAG relative luminance — only plum (L≈0.13) needs white text.
         switch marker.color {
         case "plum": return .white
         default:     return .black
@@ -1425,13 +1106,12 @@ class SimpleMarkerView: UIView {
     }
 
     /// Called from the coordinator when count or target changes in the toolbar panel.
-    /// Instantly transitions to/from checkmark state so no move is needed.
     func refreshCount(_ count: Int, target: Int) {
-        self.target = target   // keep local copy in sync
+        self.target = target
 
         if target > 0 && count >= target {
-            // ── Complete state ──
-            guard checkmarkImageView == nil else { return }  // already showing
+            // Complete state
+            guard checkmarkImageView == nil else { return }
             countLabel.removeFromSuperview()
             let checkmark = UIImageView(image: UIImage(systemName: "checkmark"))
             checkmark.tintColor = .white
@@ -1440,7 +1120,7 @@ class SimpleMarkerView: UIView {
             innerView.addSubview(checkmark)
             checkmarkImageView = checkmark
         } else {
-            // ── Counting state ── (also handles decrement back below target)
+            // Counting state (also handles decrement back below target)
             if checkmarkImageView != nil {
                 checkmarkImageView?.removeFromSuperview()
                 checkmarkImageView = nil
@@ -1454,7 +1134,7 @@ class SimpleMarkerView: UIView {
     }
 }
 
-// MARK: - Term Highlight Annotation
+// MARK: - Term Highlight Annotation (legacy, kept for reference)
 class MarkerAnnotation: PDFAnnotation {
     let marker: Marker
     
@@ -1480,33 +1160,24 @@ class MarkerAnnotation: PDFAnnotation {
     }
     
     override func draw(with box: PDFDisplayBox, in context: CGContext) {
-        // Ensure we have a valid context
         guard UIGraphicsGetCurrentContext() != nil else { return }
         
-        // Save graphics state
         context.saveGState()
         
-        // Get the bounds for drawing
         let drawBounds = self.bounds
         
-        // Draw circular background
         let circlePath = UIBezierPath(ovalIn: drawBounds)
         context.setFillColor(markerColor().cgColor)
         context.addPath(circlePath.cgPath)
         context.fillPath()
         
-        // Draw shadow
         context.setShadow(offset: CGSize(width: 0, height: 2), blur: 4, color: UIColor.black.withAlphaComponent(0.3).cgColor)
         
-        // Restore graphics state before drawing text/icons
         context.restoreGState()
         
-        // Push context for text/icon drawing
         UIGraphicsPushContext(context)
         
-        // Draw content (icon or counter text)
         if marker.type == .counter {
-            // Draw counter text
             let text = "\(marker.currentCount)/\(marker.targetCount)"
             let paragraphStyle = NSMutableParagraphStyle()
             paragraphStyle.alignment = .center
@@ -1528,7 +1199,6 @@ class MarkerAnnotation: PDFAnnotation {
             
             attributedString.draw(in: textRect)
         } else {
-            // Draw note icon (simplified - just a small rectangle representing a note)
             let iconSize: CGFloat = 26
             let iconRect = CGRect(
                 x: drawBounds.midX - iconSize / 2,
@@ -1537,14 +1207,12 @@ class MarkerAnnotation: PDFAnnotation {
                 height: iconSize
             )
             
-            // Draw a simplified note icon using paths
             context.setStrokeColor(UIColor.white.cgColor)
             context.setLineWidth(2)
             
             let notePath = UIBezierPath(rect: iconRect.insetBy(dx: 4, dy: 4))
             notePath.stroke()
             
-            // Draw lines representing text
             let lineY1 = iconRect.midY - 2
             let lineY2 = iconRect.midY + 2
             let lineX1 = iconRect.minX + 6
@@ -1561,7 +1229,6 @@ class MarkerAnnotation: PDFAnnotation {
             line2.stroke()
         }
         
-        // Pop context
         UIGraphicsPopContext()
     }
     
@@ -1576,5 +1243,3 @@ class MarkerAnnotation: PDFAnnotation {
         }
     }
 }
-
-

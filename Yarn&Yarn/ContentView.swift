@@ -2,108 +2,294 @@
 //  ContentView.swift
 //  Yarn&Yarn
 //
-//  Created by Yangyang Long on 3/16/26.
-//
 
 import SwiftUI
 import SwiftData
 import PhotosUI
 import PDFKit
 
-// MARK: - Root view
+// MARK: - Root
 
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
-    @Query(sort: \InstructionDocument.createdDate, order: .reverse)
-    private var documents: [InstructionDocument]
+    @Query(sort: \InstructionDocument.createdDate, order: .reverse) private var documents: [InstructionDocument]
+    @Query(sort: \KnittingProject.startDate, order: .reverse)       private var projects:  [KnittingProject]
 
-    @State private var showingImportView = false
-    @State private var showingGlossary = false
-    @State private var documentToEdit: InstructionDocument?
+    enum Tab { case library, project }
+    enum LibraryLayout { case card, list }
+
+    @State private var selectedTab:    Tab           = .library
+    @State private var libraryLayout:  LibraryLayout = .card
+    @State private var librarySearch:  String        = ""
+    @State private var showingImport     = false
+    @State private var showingNewProject = false
+    @State private var documentToEdit:  InstructionDocument? = nil
 
     var body: some View {
         NavigationStack {
-            Group {
-                if documents.isEmpty {
-                    ContentUnavailableView {
-                        Label("No Patterns", systemImage: "doc.text.image")
-                    } description: {
-                        Text("Import your first knitting or crocheting pattern to get started")
-                    } actions: {
-                        Button {
-                            showingImportView = true
-                        } label: {
-                            Label("Import Pattern", systemImage: "plus")
-                        }
-                        .buttonStyle(.borderedProminent)
+            VStack(spacing: 0) {
+                // ── Top control bar ──────────────────────────────────────
+                HStack(spacing: 12) {
+                    Picker("Tab", selection: $selectedTab) {
+                        Text("Library").tag(Tab.library)
+                        Text("Project").tag(Tab.project)
                     }
-                } else {
-                    ScrollView(.vertical) {
-                        HStack(alignment: .top, spacing: 12) {
-                            masonryColumn(parity: 0)
-                            masonryColumn(parity: 1)
+                    .pickerStyle(.segmented)
+
+                    if selectedTab == .library {
+                        Picker("Layout", selection: $libraryLayout) {
+                            Image(systemName: "square.grid.2x2").tag(LibraryLayout.card)
+                            Image(systemName: "list.bullet").tag(LibraryLayout.list)
                         }
-                        .padding(.horizontal, 16)
+                        .pickerStyle(.segmented)
+                        .frame(width: 80)
+                        .transition(.opacity.combined(with: .scale(scale: 0.9)))
                     }
                 }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .animation(.spring(response: 0.3), value: selectedTab)
+
+                // ── Search bar (library only) ────────────────────────────
+                if selectedTab == .library {
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundStyle(.secondary)
+                            .font(.subheadline)
+                        TextField("Search patterns", text: $librarySearch)
+                            .font(.subheadline)
+                            .autocorrectionDisabled()
+                            .submitLabel(.search)
+                        if !librarySearch.isEmpty {
+                            Button {
+                                librarySearch = ""
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+
+                Divider()
+
+                // ── Swipeable tab content ────────────────────────────────
+                TabView(selection: $selectedTab) {
+                    LibraryTabView(
+                        documents: documents,
+                        layout: libraryLayout,
+                        searchText: librarySearch,
+                        onEdit:   { documentToEdit = $0 },
+                        onDelete: { modelContext.delete($0); try? modelContext.save() }
+                    )
+                    .tag(Tab.library)
+
+                    ProjectTabView(
+                        projects:  projects,
+                        onDelete: { modelContext.delete($0); try? modelContext.save() }
+                    )
+                    .tag(Tab.project)
+                }
+                .tabViewStyle(.page(indexDisplayMode: .never))
+                // Reserve space at the bottom so scroll content clears the FAB
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    Color.clear.frame(height: 88)
+                }
             }
-            .navigationTitle("Yarn & Yarn")
+            // ── Floating action button ────────────────────────────────
+            .overlay(alignment: .bottom) {
+                Button {
+                    switch selectedTab {
+                    case .library:  showingImport = true
+                    case .project:  showingNewProject = true
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 15, weight: .bold))
+                        Text(selectedTab == .library ? "Upload Pattern" : "Start a project")
+                            .font(.subheadline.weight(.semibold))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 14)
+                    .background(Capsule().fill(Color.accentColor))
+                    .shadow(color: Color.accentColor.opacity(0.35), radius: 12, y: 5)
+                }
+                .animation(.spring(response: 0.3), value: selectedTab)
+                .padding(.bottom, 24)
+            }
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.inline)
+            // ── Navigation destinations ───────────────────────────────
             .navigationDestination(for: InstructionDocument.self) { doc in
-                DocumentViewerView(document: doc)
+                LibraryPatternView(document: doc)
             }
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button {
-                        showingGlossary = true
-                    } label: {
-                        Label("Glossary", systemImage: "book.closed")
-                    }
-                }
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        showingImportView = true
-                    } label: {
-                        Label("Import Pattern", systemImage: "plus")
-                    }
+            .navigationDestination(for: KnittingProject.self) { project in
+                if let pattern = project.pattern {
+                    DocumentViewerView(document: pattern, project: project)
+                } else {
+                    ContentUnavailableView(
+                        "Pattern Not Found",
+                        systemImage: "doc.text.image.fill",
+                        description: Text("The pattern for this project has been deleted from your library.")
+                    )
                 }
             }
-            .sheet(isPresented: $showingImportView) {
-                DocumentImportView()
+            // ── Sheets ───────────────────────────────────────────────
+            .sheet(isPresented: $showingImport)      { DocumentImportView() }
+            .sheet(isPresented: $showingNewProject)  { NewProjectSheet() }
+            .sheet(item: $documentToEdit)            { DocumentEditSheet(document: $0) }
+        }
+    }
+}
+
+// MARK: - Library Tab
+
+struct LibraryTabView: View {
+    let documents:  [InstructionDocument]
+    let layout:     ContentView.LibraryLayout
+    let searchText: String
+    let onEdit:    (InstructionDocument) -> Void
+    let onDelete:  (InstructionDocument) -> Void
+
+    private var filteredDocuments: [InstructionDocument] {
+        guard !searchText.trimmingCharacters(in: .whitespaces).isEmpty else { return documents }
+        let q = searchText.lowercased()
+        return documents.filter {
+            $0.title.lowercased().contains(q) ||
+            $0.subjectTags.contains { $0.lowercased().contains(q) } ||
+            $0.projectTags.contains  { $0.lowercased().contains(q) }
+        }
+    }
+
+    var body: some View {
+        Group {
+            if documents.isEmpty {
+                ContentUnavailableView {
+                    Label("No Patterns", systemImage: "doc.text.image")
+                } description: {
+                    Text("Import your first knitting or crochet pattern to get started.")
+                }
+            } else if filteredDocuments.isEmpty {
+                ContentUnavailableView.search(text: searchText)
+            } else {
+                switch layout {
+                case .card:  cardView
+                case .list:  listView
+                }
             }
-            .sheet(isPresented: $showingGlossary) {
-                GlossaryBrowserView()
+        }
+    }
+
+    // ── Masonry card grid ────────────────────────────────────────────
+    private var cardView: some View {
+        ScrollView(.vertical) {
+            HStack(alignment: .top, spacing: 12) {
+                masonryColumn(parity: 0)
+                masonryColumn(parity: 1)
             }
-            .sheet(item: $documentToEdit) { doc in
-                DocumentEditSheet(document: doc)
-            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
         }
     }
 
     @ViewBuilder
     private func masonryColumn(parity: Int) -> some View {
+        let visible = filteredDocuments
         VStack(spacing: 12) {
-            ForEach(documents.indices.filter { $0 % 2 == parity }, id: \.self) { i in
-                let document = documents[i]
-                NavigationLink(value: document) {
-                    DocumentCardView(document: document)
+            ForEach(visible.indices.filter { $0 % 2 == parity }, id: \.self) { i in
+                let doc = visible[i]
+                NavigationLink(value: doc) {
+                    DocumentCardView(document: doc)
                 }
                 .buttonStyle(.plain)
                 .contextMenu {
-                    Button("Edit Info", systemImage: "pencil") {
-                        documentToEdit = document
-                    }
+                    Button("Edit Info", systemImage: "pencil") { onEdit(doc) }
                     Divider()
-                    Button("Delete", systemImage: "trash", role: .destructive) {
-                        modelContext.delete(document)
-                    }
+                    Button("Delete", systemImage: "trash", role: .destructive) { onDelete(doc) }
                 }
             }
         }
         .frame(maxWidth: .infinity, alignment: .top)
     }
+
+    // ── List view ────────────────────────────────────────────────────
+    private var listView: some View {
+        ScrollView(.vertical) {
+            VStack(spacing: 8) {
+                ForEach(filteredDocuments) { doc in
+                    NavigationLink(value: doc) {
+                        DocumentListRowView(document: doc)
+                    }
+                    .buttonStyle(.plain)
+                    .contextMenu {
+                        Button("Edit Info", systemImage: "pencil") { onEdit(doc) }
+                        Divider()
+                        Button("Delete", systemImage: "trash", role: .destructive) { onDelete(doc) }
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+        }
+    }
 }
 
-// MARK: - Card view
+// MARK: - Project Tab
+
+struct ProjectTabView: View {
+    let projects:  [KnittingProject]
+    let onDelete: (KnittingProject) -> Void
+
+    var body: some View {
+        if projects.isEmpty {
+            ContentUnavailableView {
+                Label("No Projects", systemImage: "tray")
+            } description: {
+                Text("Tap + to start a new knitting or crochet project.")
+            }
+        } else {
+            ScrollView(.vertical) {
+                VStack(spacing: 8) {
+                    ForEach(projects) { project in
+                        NavigationLink(value: project) {
+                            ProjectRowView(project: project)
+                        }
+                        .buttonStyle(.plain)
+                        .contextMenu {
+                            // Quick status change
+                            Menu("Set Status", systemImage: "circle.lefthalf.filled") {
+                                ForEach(KnittingProject.Status.allCases, id: \.self) { s in
+                                    Button {
+                                        project.status = s
+                                    } label: {
+                                        Label(s.rawValue, systemImage: s.icon)
+                                    }
+                                }
+                            }
+                            Divider()
+                            Button("Delete", systemImage: "trash", role: .destructive) {
+                                onDelete(project)
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+            }
+        }
+    }
+}
+
+// MARK: - Document card (card layout)
 
 struct DocumentCardView: View {
     let document: InstructionDocument
@@ -113,15 +299,11 @@ struct DocumentCardView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            // Cover image — Color.aspectRatio(.fit) owns the size;
-            // the image is overlaid so it never participates in layout measurement.
             Color(.secondarySystemBackground)
                 .aspectRatio(3 / 4, contentMode: .fit)
                 .overlay {
                     if let img = thumbnail {
-                        Image(uiImage: img)
-                            .resizable()
-                            .scaledToFill()
+                        Image(uiImage: img).resizable().scaledToFill()
                     } else {
                         Image(systemName: document.isPDF ? "doc.fill" : "photo.fill")
                             .font(.system(size: 36))
@@ -143,17 +325,13 @@ struct DocumentCardView: View {
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 14).fill(Color(.systemBackground)))
-        .clipShape(RoundedRectangle(cornerRadius: 14))
         .shadow(color: .black.opacity(0.06), radius: 6, x: 0, y: 3)
-        .task(id: document.id) {
-            await loadThumbnail()
-        }
+        .task(id: document.id) { await loadThumbnail() }
     }
 
     private func loadThumbnail() async {
         if let data = document.coverImageData, let img = UIImage(data: data) {
-            thumbnail = img
-            return
+            thumbnail = img; return
         }
         if document.isPDF,
            let pdf = PDFDocument(data: document.fileData),
@@ -165,7 +343,311 @@ struct DocumentCardView: View {
     }
 }
 
-// MARK: - Tag display chip row
+// MARK: - Document list row (list layout)
+
+struct DocumentListRowView: View {
+    let document: InstructionDocument
+    @State private var thumbnail: UIImage?
+
+    var allTags: [String] { document.subjectTags + document.projectTags }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            // Small portrait thumbnail
+            Color(.secondarySystemBackground)
+                .frame(width: 48, height: 64)
+                .overlay {
+                    if let img = thumbnail {
+                        Image(uiImage: img).resizable().scaledToFill()
+                    } else {
+                        Image(systemName: document.isPDF ? "doc.fill" : "photo.fill")
+                            .font(.system(size: 18))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .clipped()
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(document.title)
+                    .font(.subheadline.weight(.medium))
+                    .lineLimit(2)
+                    .foregroundStyle(.primary)
+
+                if !allTags.isEmpty {
+                    TagChipRow(tags: allTags, maxVisible: 2)
+                }
+
+                Text(document.createdDate.formatted(.dateTime.month(.abbreviated).day().year()))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Image(systemName: "chevron.right")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color(.systemBackground)))
+        .shadow(color: .black.opacity(0.05), radius: 4, x: 0, y: 2)
+        .task(id: document.id) { await loadThumbnail() }
+    }
+
+    private func loadThumbnail() async {
+        if let data = document.coverImageData, let img = UIImage(data: data) {
+            thumbnail = img; return
+        }
+        if document.isPDF,
+           let pdf = PDFDocument(data: document.fileData),
+           let page = pdf.page(at: 0) {
+            thumbnail = page.thumbnail(of: CGSize(width: 150, height: 200), for: .mediaBox)
+        } else if document.isImage {
+            thumbnail = UIImage(data: document.fileData)
+        }
+    }
+}
+
+// MARK: - Project list row
+
+struct ProjectRowView: View {
+    let project: KnittingProject
+
+    var body: some View {
+        HStack(spacing: 12) {
+            // Status icon
+            Image(systemName: project.status.icon)
+                .foregroundStyle(project.status.color)
+                .font(.system(size: 18))
+                .frame(width: 28)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(project.displayName)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+
+                // Show pattern name only when the project has a custom name
+                if let pattern = project.pattern,
+                   !project.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text(pattern.title)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Text(project.startDate.formatted(.dateTime.month(.abbreviated).day().year()))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            // Status badge
+            Text(project.status.rawValue)
+                .font(.caption.weight(.medium))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Capsule().fill(project.status.color.opacity(0.14)))
+                .foregroundStyle(project.status.color)
+
+            Image(systemName: "chevron.right")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 12)
+        .padding(.horizontal, 14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color(.systemBackground)))
+        .shadow(color: .black.opacity(0.05), radius: 4, x: 0, y: 2)
+    }
+}
+
+// MARK: - Library pattern viewer (read-only, no glossary / counter)
+
+struct LibraryPatternView: View {
+    let document: InstructionDocument
+    @State private var showingCreateProject = false
+    @State private var showingEditSheet     = false
+
+    var body: some View {
+        ZStack {
+            // ── Pattern content ──────────────────────────────────────
+            if document.isPDF {
+                LibraryPDFView(data: document.fileData)
+                    .ignoresSafeArea(edges: .bottom)
+            } else if let image = UIImage(data: document.fileData) {
+                ScrollView([.vertical, .horizontal]) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: .infinity)
+                }
+            }
+        }
+        .navigationTitle(document.title)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    showingEditSheet = true
+                } label: {
+                    Image(systemName: "square.and.pencil")
+                }
+            }
+        }
+        // ── Create Project FAB ───────────────────────────────────────
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            HStack {
+                Spacer()
+                Button {
+                    showingCreateProject = true
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 15, weight: .bold))
+                        Text("Create Project")
+                            .font(.subheadline.weight(.semibold))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 14)
+                    .background(Capsule().fill(Color.accentColor))
+                    .shadow(color: Color.accentColor.opacity(0.35), radius: 12, y: 5)
+                }
+                Spacer()
+            }
+            .padding(.bottom, 24)
+            .background(.clear)
+        }
+        .sheet(isPresented: $showingCreateProject) {
+            NewProjectSheet(preselectedPattern: document)
+        }
+        .sheet(isPresented: $showingEditSheet) {
+            DocumentEditSheet(document: document)
+        }
+    }
+}
+
+/// Bare-bones PDFView wrapper — scroll, zoom, no overlays.
+struct LibraryPDFView: UIViewRepresentable {
+    let data: Data
+
+    func makeUIView(context: Context) -> PDFView {
+        let view = PDFView()
+        view.document = PDFDocument(data: data)
+        view.autoScales = true
+        view.displayMode = .singlePageContinuous
+        view.displayDirection = .vertical
+        view.backgroundColor = .systemBackground
+        return view
+    }
+
+    func updateUIView(_ uiView: PDFView, context: Context) {}
+}
+
+// MARK: - New Project Sheet
+
+struct NewProjectSheet: View {
+    /// When launched from LibraryPatternView the pattern is pre-selected.
+    var preselectedPattern: InstructionDocument? = nil
+
+    @Environment(\.modelContext) private var modelContext
+    @Environment(\.dismiss) private var dismiss
+    @Query(sort: \InstructionDocument.createdDate, order: .reverse)
+    private var documents: [InstructionDocument]
+
+    @State private var projectName = ""
+    @State private var selectedID: UUID? = nil
+    @State private var startDate   = Date()
+    @State private var status      = KnittingProject.Status.notStarted
+
+    private var selectedPattern: InstructionDocument? {
+        documents.first { $0.id == selectedID }
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                // Pattern picker
+                Section {
+                    if let fixed = preselectedPattern {
+                        // Launched from the library viewer — pattern is locked
+                        HStack {
+                            Text(fixed.title)
+                            Spacer()
+                            Image(systemName: "lock.fill")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else if documents.isEmpty {
+                        Text("No patterns in library — import one first.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Picker("Pattern", selection: $selectedID) {
+                            Text("Select a pattern…").tag(Optional<UUID>.none)
+                            ForEach(documents) { doc in
+                                Text(doc.title).tag(Optional(doc.id))
+                            }
+                        }
+                        .pickerStyle(.navigationLink)
+                    }
+                } header: {
+                    Text("Pattern")
+                } footer: {
+                    Text("A project is tied to one pattern. The same pattern can be used for multiple projects.")
+                }
+
+                Section("Project Name") {
+                    TextField("Optional — defaults to pattern name", text: $projectName)
+                }
+
+                Section("Details") {
+                    DatePicker("Start Date", selection: $startDate, displayedComponents: .date)
+
+                    Picker("Status", selection: $status) {
+                        ForEach(KnittingProject.Status.allCases, id: \.self) { s in
+                            Label(s.rawValue, systemImage: s.icon).tag(s)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("New Project")
+            .navigationBarTitleDisplayMode(.inline)
+            .onAppear {
+                // Pre-seed when launched from a library pattern view
+                if let p = preselectedPattern { selectedID = p.id }
+            }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Create") { createProject() }
+                        .fontWeight(.semibold)
+                        .disabled(selectedID == nil)
+                }
+            }
+        }
+    }
+
+    private func createProject() {
+        let project = KnittingProject(
+            name:      projectName,
+            pattern:   selectedPattern,
+            startDate: startDate,
+            status:    status
+        )
+        modelContext.insert(project)
+        try? modelContext.save()
+        dismiss()
+    }
+}
+
+// MARK: - Tag chip row
 
 struct TagChipRow: View {
     let tags: [String]
@@ -191,7 +673,7 @@ struct TagChipRow: View {
     }
 }
 
-// MARK: - Edit sheet
+// MARK: - Document edit sheet
 
 struct DocumentEditSheet: View {
     @Bindable var document: InstructionDocument
@@ -222,14 +704,12 @@ struct DocumentEditSheet: View {
         return generatedCoverImage
     }
 
-    // Bindings backed by the document's tag arrays
     @State private var selectedSubjectTags: Set<String> = []
     @State private var selectedProjectTags: Set<String> = []
 
     var body: some View {
         NavigationStack {
             Form {
-                // Cover
                 Section {
                     VStack(spacing: 12) {
                         coverPreview
@@ -258,26 +738,14 @@ struct DocumentEditSheet: View {
                 }
 
                 Section {
-                    TagPickerRow(
-                        tags: allSubjectTags,
-                        selected: $selectedSubjectTags,
-                        onAddTap: { showingAddSubjectTag = true }
-                    )
-                    .listRowInsets(EdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 12))
-                } header: {
-                    Text("Subject (Optional)")
-                }
+                    TagPickerRow(tags: allSubjectTags, selected: $selectedSubjectTags, onAddTap: { showingAddSubjectTag = true })
+                        .listRowInsets(EdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 12))
+                } header: { Text("Subject (Optional)") }
 
                 Section {
-                    TagPickerRow(
-                        tags: allProjectTags,
-                        selected: $selectedProjectTags,
-                        onAddTap: { showingAddProjectTag = true }
-                    )
-                    .listRowInsets(EdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 12))
-                } header: {
-                    Text("Project Type (Optional)")
-                }
+                    TagPickerRow(tags: allProjectTags, selected: $selectedProjectTags, onAddTap: { showingAddProjectTag = true })
+                        .listRowInsets(EdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 12))
+                } header: { Text("Project Type (Optional)") }
             }
             .navigationTitle("Edit Pattern")
             .navigationBarTitleDisplayMode(.inline)
@@ -312,9 +780,7 @@ struct DocumentEditSheet: View {
     @ViewBuilder
     private var coverPreview: some View {
         if let img = coverImage {
-            Image(uiImage: img)
-                .resizable()
-                .scaledToFill()
+            Image(uiImage: img).resizable().scaledToFill()
         } else {
             RoundedRectangle(cornerRadius: 10)
                 .fill(Color(.secondarySystemBackground))
@@ -327,9 +793,7 @@ struct DocumentEditSheet: View {
         if document.isPDF,
            let pdf = PDFDocument(data: document.fileData),
            let page = pdf.page(at: 0) {
-            generatedCoverImage = page.thumbnail(
-                of: CGSize(width: 400, height: 560), for: .mediaBox
-            )
+            generatedCoverImage = page.thumbnail(of: CGSize(width: 400, height: 560), for: .mediaBox)
         } else if document.isImage {
             generatedCoverImage = UIImage(data: document.fileData)
         }
@@ -346,7 +810,9 @@ struct DocumentEditSheet: View {
     }
 }
 
+// MARK: - Preview
+
 #Preview {
     ContentView()
-        .modelContainer(for: InstructionDocument.self, inMemory: true)
+        .modelContainer(for: [InstructionDocument.self, Marker.self, KnittingProject.self], inMemory: true)
 }

@@ -9,35 +9,52 @@ import SwiftUI
 import PDFKit
 import SwiftData
 
+enum ActiveTab { case glossary, counter }
+
 struct DocumentViewerView: View {
     @Environment(\.modelContext) private var modelContext
     @Bindable var document: InstructionDocument
-    
+    /// When opened from the Project tab, the associated project is passed in so the
+    /// view can show the project name and let the user update its status.
+    @Bindable var project: KnittingProject
+
     @State private var selectedTerminology: String?
     @State private var showingTerminologyPopover = false
     @State private var isDraggingMarker = false
     @State private var draggingMarkerType: Marker.MarkerType?
     @State private var newMarkerPosition: CGPoint?
-    @State private var highlightingEnabled = true
+    @StateObject private var lensBridge = LensBridge()
+    @State private var activeTab: ActiveTab? = nil
+    @State private var lensPosition: CGPoint = .zero
+    @State private var lensDragAnchor: CGPoint = .zero       // lens center at gesture start
+    @State private var lastDragStart: CGPoint = .zero        // v.startLocation of current gesture
+    @State private var lensTerms: [(term: KnittingGlossary.Term, screenRect: CGRect)] = []
     @State private var showingGlossary = false
-    @State private var currentPage = 0 // Track current page
-    @State private var showingTextReader = false // Toggle between PDF and text reader
+    @State private var currentPage = 0
+    @State private var showingTextReader = false
     @State private var showingEditSheet = false
-    @State private var showingCounterPanel = false
     @State private var counterToEdit: Marker?
     @State private var visibleCounterIDs: Set<UUID> = []
+    @State private var viewportCenter: CGPoint = CGPoint(x: 0.5, y: 0.5)
+
+    private var lensActive: Bool { activeTab == .glossary }
 
     private var counterMarkers: [Marker] {
         document.markers
             .filter { $0.type == .counter }
-            .sorted { $0.createdDate < $1.createdDate }
             .filter { visibleCounterIDs.contains($0.id) }
+            .sorted { lhs, rhs in
+                if lhs.pageNumber != rhs.pageNumber {
+                    return lhs.pageNumber < rhs.pageNumber
+                }
+                // Higher positionY = visually higher on screen (PDF Y is bottom-up)
+                if abs(lhs.positionY - rhs.positionY) > 0.02 {
+                    return lhs.positionY > rhs.positionY
+                }
+                return lhs.positionX < rhs.positionX
+            }
     }
 
-    private var hasAnyCounters: Bool {
-        document.markers.contains { $0.type == .counter }
-    }
-    
     var body: some View {
         ZStack {
             // Document display with markers embedded
@@ -48,18 +65,81 @@ struct DocumentViewerView: View {
                         TextReaderView(pdfDocument: pdfDocument)
                     }
                 } else {
-                    // PDF viewer mode - with markers and highlighting
-                    NativePDFDocumentView(pdfData: document.fileData, document: document, highlightingEnabled: highlightingEnabled, currentPage: $currentPage, visibleCounterIDs: $visibleCounterIDs)
+                    // PDF viewer mode - with markers and lens
+                    NativePDFDocumentView(pdfData: document.fileData, document: document, lensBridge: lensBridge, currentPage: $currentPage, visibleCounterIDs: $visibleCounterIDs, viewportCenter: $viewportCenter)
                 }
             } else {
-                ImageDocumentView(imageData: document.fileData, document: document, highlightingEnabled: highlightingEnabled)
+                ImageDocumentView(imageData: document.fileData, document: document, highlightingEnabled: false)
             }
-            
+
+            // MARK: - Lens Overlay
+            if lensActive && !showingTextReader && document.isPDF {
+                GeometryReader { geo in
+                    // Lens: transparent circle with highlight rects inside, border ring only
+                    ZStack {
+                        ForEach(lensTerms.indices, id: \.self) { i in
+                            let info = lensTerms[i]
+                            let isFocused = i == 0
+                            RoundedRectangle(cornerRadius: 3)
+                                // Focused term: orange; others: soft yellow
+                                .fill(isFocused
+                                      ? Color.orange.opacity(0.7)
+                                      : Color.yellow.opacity(0.45))
+                                .frame(width: info.screenRect.width,
+                                       height: info.screenRect.height)
+                                .offset(
+                                    x: info.screenRect.midX - lensPosition.x,
+                                    y: info.screenRect.midY - lensPosition.y
+                                )
+                        }
+                    }
+                    .frame(width: 200, height: 200)
+                    .clipShape(Circle())
+                    .contentShape(Circle())
+                    .overlay { Circle().strokeBorder(Color.accentColor.opacity(0.7), lineWidth: 2) }
+                    .position(lensPosition)
+                    // .simultaneousGesture lets the UIKit PDFView pinch-to-zoom recognizer
+                    // fire at the same time as the lens drag — without it, touches on the
+                    // circle area would exclusively block the underlying PDFView gestures.
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { v in
+                                // Detect new gesture by comparing startLocation; preserve the
+                                // initial offset between finger and lens center so the circle
+                                // doesn't jump to center under the finger.
+                                if v.startLocation != lastDragStart {
+                                    lensDragAnchor = lensPosition
+                                    lastDragStart = v.startLocation
+                                }
+                                lensPosition = CGPoint(
+                                    x: lensDragAnchor.x + v.translation.width,
+                                    y: lensDragAnchor.y + v.translation.height
+                                )
+                                refreshLensTerms()
+                            }
+                    )
+                    .onAppear {
+                        if lensPosition == .zero {
+                            lensPosition = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
+                            refreshLensTerms()
+                        }
+                    }
+                    .onChange(of: viewportCenter) {
+                        refreshLensTerms()
+                    }
+                }
+            }
+        }
+        .onGeometryChange(for: CGPoint.self) { $0.frame(in: .global).origin } action: {
+            lensBridge.lensOriginInWindow = $0
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if !showingTextReader {
                 VStack(spacing: 0) {
-                    if showingCounterPanel && hasAnyCounters {
+                    if activeTab == .glossary {
+                        Divider()
+                        GlossaryPanelView(lensTerms: lensTerms)
+                    } else if activeTab == .counter {
                         Divider()
                         CounterPanelView(
                             counters: counterMarkers,
@@ -67,15 +147,12 @@ struct DocumentViewerView: View {
                             onDelete: { marker in
                                 modelContext.delete(marker)
                                 try? modelContext.save()
-                            }
+                            },
+                            onAddCounter: addCounter
                         )
                     }
-                    DocumentToolbarBar(
-                        showingPanel: $showingCounterPanel,
-                        hasCounters: hasAnyCounters,
-                        onAddCounter: addCounter,
-                        onGlossaryTap: { /* TODO: glossary */ }
-                    )
+                    Divider()
+                    DocumentToolbarTabs(activeTab: $activeTab, isPDF: document.isPDF)
                 }
                 .background(.bar)
             }
@@ -84,7 +161,7 @@ struct DocumentViewerView: View {
             CounterEditSheet(counter: counter)
                 .presentationDetents([.medium])
         }
-        .navigationTitle(document.title)
+        .navigationTitle(project.displayName)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             // Text reader toggle (only for PDFs)
@@ -94,8 +171,6 @@ struct DocumentViewerView: View {
                         withAnimation {
                             showingTextReader.toggle()
                         }
-                        
-                        // Haptic feedback
                         let impact = UIImpactFeedbackGenerator(style: .light)
                         impact.impactOccurred()
                     } label: {
@@ -106,13 +181,33 @@ struct DocumentViewerView: View {
                     }
                 }
             }
-            
+
+            // Project status pill
+            ToolbarItem(placement: .principal) {
+                Menu {
+                    ForEach(KnittingProject.Status.allCases, id: \.self) { s in
+                        Button {
+                            project.status = s
+                            try? modelContext.save()
+                        } label: {
+                            Label(s.rawValue, systemImage: s.icon)
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: project.status.icon)
+                        Text(project.status.rawValue)
+                            .font(.caption.weight(.semibold))
+                    }
+                    .foregroundStyle(project.status.color)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(project.status.color.opacity(0.12)))
+                }
+            }
+
             ToolbarItem(placement: .primaryAction) {
                 Menu {
-                    Toggle(isOn: $highlightingEnabled) {
-                        Label("Highlight Terms", systemImage: "highlighter")
-                    }
-
                     Button {
                         showingGlossary = true
                     } label: {
@@ -124,7 +219,7 @@ struct DocumentViewerView: View {
                     Button {
                         showingEditSheet = true
                     } label: {
-                        Label("Edit Info", systemImage: "pencil")
+                        Label("Edit Pattern Info", systemImage: "pencil")
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")
@@ -162,8 +257,8 @@ struct DocumentViewerView: View {
         let newMarker = Marker.counterMarker(
             label: "Counter \(n + 1)",
             targetCount: 0,
-            positionX: 0.5,
-            positionY: 0.5,
+            positionX: viewportCenter.x,
+            positionY: viewportCenter.y,
             pageNumber: currentPage,
             color: counterColorPool.randomElement() ?? "green"
         )
@@ -171,17 +266,42 @@ struct DocumentViewerView: View {
         document.markers.append(newMarker)
         modelContext.insert(newMarker)
         try? modelContext.save()
-        withAnimation(.spring(response: 0.3)) { showingCounterPanel = true }
+        // Immediately mark the new counter as visible so the panel row appears
+        // right away. The CADisplayLink will confirm/correct visibility on the next frame.
+        visibleCounterIDs.insert(newMarker.id)
+        withAnimation(.spring(response: 0.3)) { activeTab = .counter }
     }
+
+    // MARK: - Lens helpers
+
+    private func refreshLensTerms() {
+        let radius: CGFloat = 100
+        let origin = lensBridge.lensOriginInWindow
+        // Convert lens position from SwiftUI local space → UIKit window space
+        let centerInWindow = CGPoint(x: origin.x + lensPosition.x, y: origin.y + lensPosition.y)
+        let raw = lensBridge.queryTermsAt?(centerInWindow, radius) ?? []
+        // Convert returned window-space rects back to SwiftUI local space for rendering
+        lensTerms = raw
+            .map { (term: $0.0, screenRect: CGRect(x: $0.1.origin.x - origin.x,
+                                                   y: $0.1.origin.y - origin.y,
+                                                   width: $0.1.width, height: $0.1.height)) }
+            .sorted { a, b in
+                let da = hypot(a.screenRect.midX - lensPosition.x, a.screenRect.midY - lensPosition.y)
+                let db = hypot(b.screenRect.midX - lensPosition.x, b.screenRect.midY - lensPosition.y)
+                return da < db
+            }
+    }
+
 }
 
 // MARK: - Native PDF Document View
 struct NativePDFDocumentView: View {
     let pdfData: Data
     @Bindable var document: InstructionDocument
-    let highlightingEnabled: Bool
+    let lensBridge: LensBridge
     @Binding var currentPage: Int
     var visibleCounterIDs: Binding<Set<UUID>>
+    var viewportCenter: Binding<CGPoint>
 
     // Stored in @State so the PDFDocument object is created once and remains
     // stable across re-renders. Without this, body creates a new PDFDocument
@@ -195,9 +315,10 @@ struct NativePDFDocumentView: View {
                 NativePDFReaderView(
                     pdfDocument: pdfDocument,
                     document: document,
-                    highlightingEnabled: highlightingEnabled,
+                    lensBridge: lensBridge,
                     currentPage: $currentPage,
-                    visibleCounterIDs: visibleCounterIDs
+                    visibleCounterIDs: visibleCounterIDs,
+                    viewportCenter: viewportCenter
                 )
             } else {
                 Text("Unable to load PDF")
@@ -978,91 +1099,151 @@ func counterTextColor(for name: String) -> Color {
 
 // MARK: - Document Toolbar Bar
 
-struct DocumentToolbarBar: View {
-    @Binding var showingPanel: Bool
-    let hasCounters: Bool
-    let onAddCounter: () -> Void
-    let onGlossaryTap: () -> Void
+struct DocumentToolbarTabs: View {
+    @Binding var activeTab: ActiveTab?
+    let isPDF: Bool
 
     var body: some View {
-        HStack(spacing: 12) {
-            Button(action: onGlossaryTap) {
-                Label("glossary", systemImage: "magnifyingglass")
-                    .font(.subheadline)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .foregroundStyle(Color.accentColor)
-                    .background(Capsule().stroke(Color.accentColor, lineWidth: 1.5))
+        HStack(spacing: 0) {
+            if isPDF {
+                ToolTabButton(
+                    title: "Glossary",
+                    systemImage: activeTab == .glossary ? "magnifyingglass.circle.fill" : "magnifyingglass.circle",
+                    isActive: activeTab == .glossary
+                ) {
+                    withAnimation(.spring(response: 0.3)) {
+                        activeTab = activeTab == .glossary ? nil : .glossary
+                    }
+                }
             }
-            .buttonStyle(.plain)
 
-            Button(action: onAddCounter) {
-                Label("+ counter", systemImage: "timer")
-                    .font(.subheadline)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .foregroundStyle(Color.accentColor)
-                    .background(Capsule().stroke(Color.accentColor, lineWidth: 1.5))
+            ToolTabButton(
+                title: "Counters",
+                systemImage: activeTab == .counter ? "timer.circle.fill" : "timer.circle",
+                isActive: activeTab == .counter
+            ) {
+                withAnimation(.spring(response: 0.3)) {
+                    activeTab = activeTab == .counter ? nil : .counter
+                }
             }
-            .buttonStyle(.plain)
 
             Spacer()
-
-            if hasCounters {
-                Button {
-                    withAnimation(.spring(response: 0.3)) { showingPanel.toggle() }
-                } label: {
-                    Image(systemName: showingPanel ? "chevron.down" : "chevron.up")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 28, height: 28)
-                }
-                .buttonStyle(.plain)
-            }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
     }
 }
 
-// MARK: - Counter Panel (expandable list above the toolbar bar)
+struct ToolTabButton: View {
+    let title: String
+    let systemImage: String
+    let isActive: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 3) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 22))
+                Text(title)
+                    .font(.caption2)
+            }
+            .foregroundStyle(isActive ? Color.accentColor : Color.secondary)
+            .frame(width: 72, height: 48)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Glossary Panel
+
+struct GlossaryPanelView: View {
+    let lensTerms: [(term: KnittingGlossary.Term, screenRect: CGRect)]
+
+    var body: some View {
+        Group {
+            if let closest = lensTerms.first {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(closest.term.abbreviation)
+                                .font(.title3.bold())
+                            Text(closest.term.fullName)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                        Text(closest.term.definition)
+                            .font(.body)
+                            .foregroundStyle(.primary)
+                        Text(closest.term.category.rawValue)
+                            .font(.caption.weight(.medium))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Capsule().fill(Color.accentColor.opacity(0.12)))
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                }
+                .frame(maxHeight: 160)
+            } else {
+                Text("Drag the lens over a knitting term")
+                    .font(.subheadline)
+                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 20)
+            }
+        }
+    }
+}
+
+// MARK: - Counter Panel
 
 struct CounterPanelView: View {
     let counters: [Marker]
     let onEdit: (Marker) -> Void
     let onDelete: (Marker) -> Void
+    let onAddCounter: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("COUNTERS")
-                .font(.caption)
-                .fontWeight(.semibold)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 16)
-                .padding(.top, 12)
-                .padding(.bottom, 6)
+            HStack {
+                Text("COUNTERS")
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button(action: onAddCounter) {
+                    Label("Add Counter", systemImage: "plus.circle.fill")
+                        .font(.subheadline.weight(.medium))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.accentColor)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 6)
 
-            List {
-                if counters.isEmpty {
-                    Text("No counters in view")
-                        .font(.subheadline)
-                        .foregroundStyle(.tertiary)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
-                } else {
-                    ForEach(counters) { counter in
-                        CounterRowView(counter: counter, onEdit: { onEdit(counter) })
-                            .listRowBackground(Color.clear)
-                            .listRowSeparator(.hidden)
-                            .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
-                    }
-                    .onDelete { indices in
-                        for index in indices { onDelete(counters[index]) }
+            // ScrollView + VStack avoids the List's swipe-to-delete gesture recognizer,
+            // which competed with button taps and made the minus button feel unresponsive.
+            ScrollView {
+                VStack(spacing: 4) {
+                    if counters.isEmpty {
+                        Text("No counters in view")
+                            .font(.subheadline)
+                            .foregroundStyle(.tertiary)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.vertical, 16)
+                    } else {
+                        ForEach(counters) { counter in
+                            CounterRowView(counter: counter, onEdit: { onEdit(counter) })
+                        }
                     }
                 }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
             }
-            .listStyle(.plain)
             .frame(maxHeight: 220)
         }
     }
@@ -1086,15 +1267,18 @@ struct CounterRowView: View {
             } label: {
                 Image(systemName: "minus")
                     .font(.system(size: 14, weight: .semibold))
-                    .frame(width: 32, height: 32)
+                    .frame(width: 36, height: 36)
                     .background(Circle().stroke(Color(.separator), lineWidth: 1))
+                    // Extend the tap area beyond the visible circle so nearby taps register
+                    .contentShape(Rectangle().size(CGSize(width: 52, height: 52))
+                        .offset(x: -8, y: -8))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
             .disabled(counter.currentCount == 0)
 
             Text("\(counter.currentCount)")
                 .font(.system(size: 22, weight: .bold, design: .rounded))
-                .frame(minWidth: 32, alignment: .center)
+                .frame(minWidth: 36, alignment: .center)
 
             Button {
                 counter.increment()
@@ -1102,10 +1286,12 @@ struct CounterRowView: View {
             } label: {
                 Image(systemName: "plus")
                     .font(.system(size: 14, weight: .semibold))
-                    .frame(width: 32, height: 32)
+                    .frame(width: 36, height: 36)
                     .background(Circle().stroke(Color(.separator), lineWidth: 1))
+                    .contentShape(Rectangle().size(CGSize(width: 52, height: 52))
+                        .offset(x: -8, y: -8))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
             .disabled(counter.targetCount > 0 && counter.currentCount >= counter.targetCount)
 
             if counter.targetCount > 0 {
@@ -1256,14 +1442,46 @@ struct CounterEditSheet: View {
     }
 }
 
+// MARK: - Term Definition Card
+
+struct TermDefinitionCard: View {
+    let term: KnittingGlossary.Term
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(term.abbreviation)
+                    .font(.title3.bold())
+                Text(term.fullName)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Text(term.definition)
+                .font(.caption)
+                .lineLimit(4)
+                .foregroundStyle(.primary)
+            Text(term.category.rawValue)
+                .font(.caption2.weight(.medium))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(Color.accentColor.opacity(0.15)))
+                .foregroundStyle(Color.accentColor)
+        }
+        .padding(12)
+        .frame(width: 200, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+    }
+}
+
 #Preview {
     let config = ModelConfiguration(isStoredInMemoryOnly: true)
     let container = try! ModelContainer(
-        for: InstructionDocument.self,
+        for: InstructionDocument.self, Marker.self, KnittingProject.self,
         configurations: config
     )
-    
-    // Create sample document
+
     let sampleImage = UIImage(systemName: "photo")!
     let imageData = sampleImage.pngData()!
     let doc = InstructionDocument(
@@ -1272,9 +1490,12 @@ struct CounterEditSheet: View {
         fileType: "image"
     )
     container.mainContext.insert(doc)
-    
+
+    let project = KnittingProject(name: "My Sweater", pattern: doc, status: .inProgress)
+    container.mainContext.insert(project)
+
     return NavigationStack {
-        DocumentViewerView(document: doc)
+        DocumentViewerView(document: doc, project: project)
     }
     .modelContainer(container)
 }
