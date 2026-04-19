@@ -52,9 +52,8 @@ struct CounterMarkerView: View {
             // Completion indicator
             if marker.isCompleted {
                 HStack(spacing: 4) {
-                    Image(systemName: "checkmark.circle.fill")
+                    HeroIcon(.checkCircle, size: 14)
                         .foregroundStyle(.white)
-                        .imageScale(.small)
                     Text("Complete!")
                         .font(.caption2)
                         .fontWeight(.semibold)
@@ -313,9 +312,8 @@ struct CounterEditorView: View {
                             Button {
                                 marker.decrement()
                             } label: {
-                                Image(systemName: "minus.circle.fill")
-                                    .imageScale(.large)
-                                    .foregroundStyle(marker.currentCount > 0 ? .blue : .gray)
+                                HeroIcon(.minusCircle, size: 28)
+                                    .foregroundStyle(marker.currentCount > 0 ? Color.blue : Color.gray)
                             }
                             .disabled(marker.currentCount == 0)
                             
@@ -328,9 +326,8 @@ struct CounterEditorView: View {
                             Button {
                                 marker.increment()
                             } label: {
-                                Image(systemName: "plus.circle.fill")
-                                    .imageScale(.large)
-                                    .foregroundStyle(.blue)
+                                HeroIcon(.plusCircle, size: 28)
+                                    .foregroundStyle(Color.blue)
                             }
                         }
                     }
@@ -352,8 +349,8 @@ struct CounterEditorView: View {
                     
                     if marker.isCompleted {
                         HStack {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundStyle(.green)
+                            HeroIcon(.checkCircle, size: 18)
+                                .foregroundStyle(Color.green)
                             Text("Completed!")
                                 .fontWeight(.semibold)
                                 .foregroundStyle(.green)

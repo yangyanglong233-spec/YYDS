@@ -56,8 +56,7 @@ struct TextReaderView: View {
                     HStack(spacing: 4) {
                         Text("A")
                             .font(.system(size: 14, weight: .semibold))
-                        Image(systemName: "minus")
-                            .font(.system(size: 10, weight: .bold))
+                        HeroIcon(.minus, size: 10)
                     }
                     .foregroundStyle(fontSize <= minFontSize ? .secondary : .primary)
                     .frame(width: 44, height: 44)
@@ -80,8 +79,7 @@ struct TextReaderView: View {
                     HStack(spacing: 4) {
                         Text("A")
                             .font(.system(size: 18, weight: .semibold))
-                        Image(systemName: "plus")
-                            .font(.system(size: 10, weight: .bold))
+                        HeroIcon(.plus, size: 10)
                     }
                     .foregroundStyle(fontSize >= maxFontSize ? .secondary : .primary)
                     .frame(width: 44, height: 44)

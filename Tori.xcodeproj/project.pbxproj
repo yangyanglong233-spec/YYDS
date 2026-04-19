@@ -6,6 +6,13 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		20D31EC22F8EE20B00118A5B /* DMSans-Italic-VariableFont_opsz,wght.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 20D31EC02F8EE20B00118A5B /* DMSans-Italic-VariableFont_opsz,wght.ttf */; };
+		20D31EC32F8EE20B00118A5B /* DMSans-VariableFont_opsz,wght.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 20D31EC12F8EE20B00118A5B /* DMSans-VariableFont_opsz,wght.ttf */; };
+		20D31EC82F8EE56B00118A5B /* Fraunces-VariableFont_SOFT,WONK,opsz,wght.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 20D31EC72F8EE56B00118A5B /* Fraunces-VariableFont_SOFT,WONK,opsz,wght.ttf */; };
+		20D31EC92F8EE56B00118A5B /* Fraunces-Italic-VariableFont_SOFT,WONK,opsz,wght.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 20D31EC62F8EE56B00118A5B /* Fraunces-Italic-VariableFont_SOFT,WONK,opsz,wght.ttf */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		2068B0442F689D300087B687 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -27,6 +34,10 @@
 		2068B0342F689D290087B687 /* Yarn&Yarn.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Yarn&Yarn.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		2068B0432F689D300087B687 /* Yarn&YarnTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Yarn&YarnTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		2068B04D2F689D300087B687 /* Yarn&YarnUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Yarn&YarnUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		20D31EC02F8EE20B00118A5B /* DMSans-Italic-VariableFont_opsz,wght.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "DMSans-Italic-VariableFont_opsz,wght.ttf"; sourceTree = "<group>"; };
+		20D31EC12F8EE20B00118A5B /* DMSans-VariableFont_opsz,wght.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "DMSans-VariableFont_opsz,wght.ttf"; sourceTree = "<group>"; };
+		20D31EC62F8EE56B00118A5B /* Fraunces-Italic-VariableFont_SOFT,WONK,opsz,wght.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Fraunces-Italic-VariableFont_SOFT,WONK,opsz,wght.ttf"; sourceTree = "<group>"; };
+		20D31EC72F8EE56B00118A5B /* Fraunces-VariableFont_SOFT,WONK,opsz,wght.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Fraunces-VariableFont_SOFT,WONK,opsz,wght.ttf"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -100,6 +111,10 @@
 				2068B0462F689D300087B687 /* Yarn&YarnTests */,
 				2068B0502F689D300087B687 /* Yarn&YarnUITests */,
 				2068B0352F689D290087B687 /* Products */,
+				20D31EC02F8EE20B00118A5B /* DMSans-Italic-VariableFont_opsz,wght.ttf */,
+				20D31EC12F8EE20B00118A5B /* DMSans-VariableFont_opsz,wght.ttf */,
+				20D31EC62F8EE56B00118A5B /* Fraunces-Italic-VariableFont_SOFT,WONK,opsz,wght.ttf */,
+				20D31EC72F8EE56B00118A5B /* Fraunces-VariableFont_SOFT,WONK,opsz,wght.ttf */,
 			);
 			sourceTree = "<group>";
 		};
@@ -207,7 +222,7 @@
 					};
 				};
 			};
-			buildConfigurationList = 2068B02F2F689D290087B687 /* Build configuration list for PBXProject "Yarn&Yarn" */;
+			buildConfigurationList = 2068B02F2F689D290087B687 /* Build configuration list for PBXProject "Tori" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -233,6 +248,10 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				20D31EC22F8EE20B00118A5B /* DMSans-Italic-VariableFont_opsz,wght.ttf in Resources */,
+				20D31EC32F8EE20B00118A5B /* DMSans-VariableFont_opsz,wght.ttf in Resources */,
+				20D31EC82F8EE56B00118A5B /* Fraunces-VariableFont_SOFT,WONK,opsz,wght.ttf in Resources */,
+				20D31EC92F8EE56B00118A5B /* Fraunces-Italic-VariableFont_SOFT,WONK,opsz,wght.ttf in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -421,6 +440,7 @@
 				DEVELOPMENT_TEAM = WCL73VR5Z7;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Yarn-Yarn-Info.plist";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -455,6 +475,7 @@
 				DEVELOPMENT_TEAM = WCL73VR5Z7;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Yarn-Yarn-Info.plist";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -568,7 +589,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		2068B02F2F689D290087B687 /* Build configuration list for PBXProject "Yarn&Yarn" */ = {
+		2068B02F2F689D290087B687 /* Build configuration list for PBXProject "Tori" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				2068B0552F689D300087B687 /* Debug */,

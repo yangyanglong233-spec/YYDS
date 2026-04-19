@@ -19,6 +19,72 @@ final class LensBridge: ObservableObject {
     var queryTermsAt: ((CGPoint, CGFloat) -> [(KnittingGlossary.Term, CGRect)])?
     /// Set by SwiftUI via onGeometryChange; the global (window) origin of the lens GeometryReader.
     var lensOriginInWindow: CGPoint = .zero
+    /// Returns 1 or 2 columns for the given zero-based page number.
+    var detectColumnCount: ((Int) -> Int)?
+}
+
+// MARK: - Reading Position Marker View
+
+final class ReadingPositionMarkerView: UIView {
+    /// Called continuously during drag (overlay-space position of the tip).
+    var onDragged: ((CGPoint) -> Void)?
+    /// Called when the drag ends so the coordinator can persist the final position.
+    var onDropped: (() -> Void)?
+
+    private var posAtDragStart: CGPoint = .zero
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        setup()
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func setup() {
+        backgroundColor = .clear
+        isUserInteractionEnabled = true
+
+        // Cursor arrow icon
+        let cfg = UIImage.SymbolConfiguration(pointSize: 30, weight: .semibold)
+        let img = UIImage(systemName: "cursorarrow", withConfiguration: cfg)
+        let iv = UIImageView(image: img)
+        iv.tintColor = .systemBlue
+        iv.contentMode = .scaleAspectFit
+        iv.frame = bounds
+        iv.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        addSubview(iv)
+
+        layer.shadowColor = UIColor.black.cgColor
+        layer.shadowOpacity = 0.35
+        layer.shadowRadius = 3
+        layer.shadowOffset = CGSize(width: 1, height: 2)
+
+        // Anchor at the cursor tip (top-left of the arrow glyph)
+        layer.anchorPoint = CGPoint(x: 0.12, y: 0.06)
+
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+        addGestureRecognizer(pan)
+    }
+
+    var isDragging: Bool {
+        gestureRecognizers?.compactMap { $0 as? UIPanGestureRecognizer }
+            .contains { $0.state == .changed || $0.state == .began } ?? false
+    }
+
+    @objc private func handlePan(_ g: UIPanGestureRecognizer) {
+        guard let sv = superview else { return }
+        let t = g.translation(in: sv)
+        switch g.state {
+        case .began:
+            posAtDragStart = layer.position
+        case .changed:
+            let newPos = CGPoint(x: posAtDragStart.x + t.x, y: posAtDragStart.y + t.y)
+            layer.position = newPos
+            onDragged?(newPos)
+        case .ended, .cancelled:
+            onDropped?()
+        default: break
+        }
+    }
 }
 
 // MARK: - Term Position
@@ -40,6 +106,12 @@ struct NativePDFReaderView: View {
     @Binding var currentPage: Int
     var visibleCounterIDs: Binding<Set<UUID>>
     var viewportCenter: Binding<CGPoint>
+    var hasReadingPosition: Bool
+    var isReadingMarkerVisible: Bool
+    var readingPositionPage: Int
+    var readingPositionX: Double
+    var readingPositionY: Double
+    var onReadingPositionMoved: ((Int, Double, Double) -> Void)?
 
     @State private var selectedTerm: KnittingGlossary.Term?
     @State private var showingTermDetail = false
@@ -93,7 +165,13 @@ struct NativePDFReaderView: View {
                 selectedMarker: $selectedMarker,
                 showingMarkerPopup: $showingMarkerPopup,
                 visibleCounterIDs: visibleCounterIDs,
-                viewportCenter: viewportCenter
+                viewportCenter: viewportCenter,
+                hasReadingPosition: hasReadingPosition,
+                isReadingMarkerVisible: isReadingMarkerVisible,
+                readingPositionPage: readingPositionPage,
+                readingPositionX: readingPositionX,
+                readingPositionY: readingPositionY,
+                onReadingPositionMoved: onReadingPositionMoved
             )
             .id(pdfDocument) // Prevent recreation unless document changes
             .overlay(alignment: .center) {
@@ -148,6 +226,13 @@ struct NativePDFKitView: UIViewRepresentable {
     @Binding var showingMarkerPopup: Bool
     var visibleCounterIDs: Binding<Set<UUID>>
     var viewportCenter: Binding<CGPoint>
+    // Reading position ("I am here" marker)
+    var hasReadingPosition: Bool
+    var isReadingMarkerVisible: Bool
+    var readingPositionPage: Int
+    var readingPositionX: Double
+    var readingPositionY: Double
+    var onReadingPositionMoved: ((Int, Double, Double) -> Void)?
 
     @Environment(\.modelContext) private var modelContext
 
@@ -213,14 +298,28 @@ struct NativePDFKitView: UIViewRepresentable {
         context.coordinator.visibleCounterIDsBinding = visibleCounterIDs
         context.coordinator.viewportCenterBinding = viewportCenter
         
-        // Set initial page
-        if let page = document.page(at: currentPage) {
-            pdfView.go(to: page)
-        }
+        // Store the target page — applied from inside the first PDFViewPageChanged handler
+        // once the view is laid out and pdfView.go(to:) actually works.
+        context.coordinator.initialPage = currentPage
+        context.coordinator.hasRestoredInitialPage = false
         
         // Wire up lens bridge
         lensBridge.queryTermsAt = { [weak coordinator = context.coordinator] center, radius in
             coordinator?.termsInLens(center: center, radius: radius) ?? []
+        }
+        lensBridge.detectColumnCount = { [weak coordinator = context.coordinator] pageNumber in
+            coordinator?.detectColumnCount(pageNumber: pageNumber) ?? 1
+        }
+
+        // Set up "I am here" reading position marker
+        context.coordinator.onReadingPositionMoved = onReadingPositionMoved
+        context.coordinator.hasReadingPosition  = hasReadingPosition
+        context.coordinator.readingPositionPage = readingPositionPage
+        context.coordinator.readingPositionX    = readingPositionX
+        context.coordinator.readingPositionY    = readingPositionY
+        if hasReadingPosition {
+            context.coordinator.setupReadingPositionMarker()
+            context.coordinator.readingPositionView?.isHidden = !isReadingMarkerVisible
         }
         
         // Add highlights
@@ -237,12 +336,26 @@ struct NativePDFKitView: UIViewRepresentable {
         ) { _ in
             guard let currentPDFPage = pdfView.currentPage else { return }
             let index = document.index(for: currentPDFPage)
+
+            // First notification is PDFKit's own "document loaded at page 0" event.
+            // Intercept it to jump to the restored page instead.
+            if !context.coordinator.hasRestoredInitialPage {
+                context.coordinator.hasRestoredInitialPage = true
+                let target = context.coordinator.initialPage
+                if target > 0, let targetPDFPage = document.page(at: target) {
+                    // View is now laid out — go(to:) works and will fire a second notification.
+                    pdfView.go(to: targetPDFPage)
+                } else {
+                    // Restoring to page 0 — nothing to jump, proceed normally.
+                    context.coordinator.updateCurrentPage(index)
+                    context.coordinator.addHighlights(page: index)
+                    context.coordinator.rebuildMarkerViews(markers: context.coordinator.instructionDocument.markers)
+                }
+                return
+            }
+
             context.coordinator.updateCurrentPage(index)
-            
-            // Update highlights for new page
             context.coordinator.addHighlights(page: index)
-            
-            // Update markers for all pages (vertical scroll shows markers across pages)
             context.coordinator.rebuildMarkerViews(markers: context.coordinator.instructionDocument.markers)
         }
         
@@ -318,6 +431,30 @@ struct NativePDFKitView: UIViewRepresentable {
 
         // Suppress unused variable warning
         _ = currentPDFPage
+
+        // Sync reading position marker when project changes externally
+        context.coordinator.onReadingPositionMoved = onReadingPositionMoved
+        // Always sync visibility (user may just have toggled the tab)
+        context.coordinator.readingPositionView?.isHidden = !isReadingMarkerVisible
+        let posChanged = context.coordinator.hasReadingPosition != hasReadingPosition
+            || context.coordinator.readingPositionPage != readingPositionPage
+            || abs(context.coordinator.readingPositionX - readingPositionX) > 0.001
+            || abs(context.coordinator.readingPositionY - readingPositionY) > 0.001
+        if posChanged {
+            context.coordinator.hasReadingPosition  = hasReadingPosition
+            context.coordinator.readingPositionPage = readingPositionPage
+            context.coordinator.readingPositionX    = readingPositionX
+            context.coordinator.readingPositionY    = readingPositionY
+            if hasReadingPosition {
+                if context.coordinator.readingPositionView == nil {
+                    context.coordinator.setupReadingPositionMarker()
+                }
+                context.coordinator.readingPositionView?.isHidden = !isReadingMarkerVisible
+            } else {
+                context.coordinator.readingPositionView?.removeFromSuperview()
+                context.coordinator.readingPositionView = nil
+            }
+        }
     }
     
     func makeCoordinator() -> Coordinator {
@@ -386,8 +523,129 @@ struct NativePDFKitView: UIViewRepresentable {
             displayLink?.invalidate()
         }
         
+        /// Page to scroll to on first load (seeded from project.lastReadPage).
+        var initialPage: Int = 0
+        /// Becomes true after the first PDFViewPageChanged fires and we've dispatched go(to:).
+        var hasRestoredInitialPage = false
+
+        // MARK: - Reading position marker
+        var readingPositionView: ReadingPositionMarkerView?
+        var hasReadingPosition = false
+        var readingPositionPage: Int = 0
+        var readingPositionX: Double = 0.5
+        var readingPositionY: Double = 0.5
+        var onReadingPositionMoved: ((Int, Double, Double) -> Void)?
+
+        /// Per-page column count cache (1 or 2). Populated lazily.
+        var columnCountCache: [Int: Int] = [:]
+
         func updateCurrentPage(_ page: Int) {
             currentPage = page
+        }
+
+        // MARK: - Column detection
+
+        func detectColumnCount(pageNumber: Int) -> Int {
+            if let cached = columnCountCache[pageNumber] { return cached }
+            guard let page = pdfView?.document?.page(at: pageNumber) else { return 1 }
+            let result = Self.analyseColumns(page: page)
+            columnCountCache[pageNumber] = result
+            return result
+        }
+
+        private static func analyseColumns(page: PDFPage) -> Int {
+            let pageWidth = page.bounds(for: .mediaBox).width
+            guard pageWidth > 0 else { return 1 }
+            // Select all text on the page and split into lines
+            let fullBounds = page.bounds(for: .mediaBox)
+            guard let sel = page.selection(for: fullBounds) else { return 1 }
+            let lines = sel.selectionsByLine() as? [PDFSelection] ?? []
+            guard lines.count >= 6 else { return 1 }
+
+            // Classify each line's midX as left-half or right-half
+            var left = 0; var right = 0; var mid = 0
+            for line in lines {
+                let b = line.bounds(for: page)
+                guard b.width > pageWidth * 0.05 else { continue } // skip tiny fragments
+                let mx = b.midX / pageWidth
+                if      mx < 0.40 { left  += 1 }
+                else if mx > 0.60 { right += 1 }
+                else              { mid   += 1 }
+            }
+            let total = left + right + mid
+            guard total >= 6 else { return 1 }
+            // Two-column: most lines are clearly in left or right half, few cross the centre
+            let centredRatio = Double(mid) / Double(total)
+            return centredRatio < 0.20 ? 2 : 1
+        }
+
+        // MARK: - Reading position marker management
+
+        func setupReadingPositionMarker() {
+            guard let overlayView else { return }
+            // Remove any stale marker
+            readingPositionView?.removeFromSuperview()
+
+            let marker = ReadingPositionMarkerView(frame: CGRect(x: 0, y: 0, width: 44, height: 44))
+            marker.onDragged = { [weak self] pos in
+                guard let self else { return }
+                // Live-update stored position so repositionMarkerViews stays in sync
+                if let norm = self.overlayPointToNormalised(pos) {
+                    self.readingPositionPage = norm.page
+                    self.readingPositionX    = norm.x
+                    self.readingPositionY    = norm.y
+                }
+            }
+            marker.onDropped = { [weak self] in
+                guard let self else { return }
+                self.onReadingPositionMoved?(self.readingPositionPage,
+                                             self.readingPositionX,
+                                             self.readingPositionY)
+            }
+            overlayView.addSubview(marker)
+            readingPositionView = marker
+        }
+
+        func repositionReadingPositionMarker() {
+            guard hasReadingPosition,
+                  let marker = readingPositionView,
+                  let pdfView,
+                  let overlayView,
+                  let containerView = overlayView.superview,
+                  let page = pdfView.document?.page(at: readingPositionPage) else { return }
+
+            if !marker.isDragging {
+                let pageBounds = page.bounds(for: .mediaBox)
+                let pdfPoint   = CGPoint(x: readingPositionX * pageBounds.width,
+                                         y: readingPositionY * pageBounds.height)
+                let inPDFView  = pdfView.convert(pdfPoint, from: page)
+                let inContainer = pdfView.convert(inPDFView, to: containerView)
+                let inOverlay  = overlayView.convert(inContainer, from: containerView)
+                marker.layer.position = inOverlay
+            }
+        }
+
+        /// Helper: convert an overlay-space point (tip of the cursor) back to normalised PDF coords.
+        func overlayPointToNormalised(_ point: CGPoint) -> (page: Int, x: Double, y: Double)? {
+            guard let pdfView,
+                  let overlayView,
+                  let containerView = overlayView.superview else { return nil }
+            let inContainer = overlayView.convert(point, to: containerView)
+            let inPDFView   = containerView.convert(inContainer, to: pdfView)
+            guard let page = pdfView.page(for: inPDFView, nearest: true) else { return nil }
+            let inPage      = pdfView.convert(inPDFView, to: page)
+            let bounds      = page.bounds(for: .mediaBox)
+            let pageNumber  = pdfView.document?.index(for: page) ?? 0
+            let x = max(0, min(1, Double(inPage.x / bounds.width)))
+            let y = max(0, min(1, Double(inPage.y / bounds.height)))
+            return (pageNumber, x, y)
+        }
+
+        /// `ReadingPositionMarkerView` is a UIView — expose isDragging via its gesture.
+        private var markerIsDragging: Bool {
+            readingPositionView?.gestureRecognizers?
+                .compactMap { $0 as? UIPanGestureRecognizer }
+                .contains { $0.state == .changed } ?? false
         }
         
         func updateScale(_ newScale: CGFloat) {
@@ -646,6 +904,9 @@ struct NativePDFKitView: UIViewRepresentable {
                     viewportCenterBinding?.wrappedValue = newCenter
                 }
             }
+
+            // Keep the "I am here" marker in sync with scroll/zoom
+            repositionReadingPositionMarker()
         }
 
         // MARK: - Lens Query

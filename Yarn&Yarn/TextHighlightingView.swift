@@ -510,8 +510,7 @@ struct TutorialVideoPlayer: View {
                     }
             } else if showError {
                 VStack(spacing: 12) {
-                    Image(systemName: "video.slash")
-                        .font(.system(size: 48))
+                    HeroIcon(.videoSlash, size: 48)
                         .foregroundStyle(.secondary)
                     
                     Text("Tutorial video not available")
