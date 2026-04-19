@@ -21,6 +21,8 @@ struct ComponentPlayground: View {
                     counterSection
                     cardSection
                     shadowSection
+                    iconsSection
+                    statusIconsSection
                 }
                 .padding(DesignTokens.Spacing.xl)
             }
@@ -52,7 +54,7 @@ struct ComponentPlayground: View {
 
     private var badgesSection: some View {
         PlaygroundSection(title: "Category Badges") {
-            FlowLayout(spacing: 8) {
+            PlaygroundFlowLayout(spacing: 8) {
                 ForEach(glossaryCategories, id: \.0) { name, color in
                     Text(name)
                         .font(.caption)
@@ -83,7 +85,7 @@ struct ComponentPlayground: View {
 
     private var buttonsSection: some View {
         PlaygroundSection(title: "Filter Pills (CategoryFilterButton)") {
-            FlowLayout(spacing: 8) {
+            PlaygroundFlowLayout(spacing: 8) {
                 FilterPillPreview(label: "All Terms", isSelected: true)
                 FilterPillPreview(label: "Basic Stitches", isSelected: false)
                 FilterPillPreview(label: "Cables", isSelected: false)
@@ -273,8 +275,77 @@ private struct CounterBadgePreview: View {
     }
 }
 
+    // MARK: - Heroicons Grid
+
+    private var allIcons: [(String, AppIcon)] = [
+        ("magnifyingGlass",          .magnifyingGlass),
+        ("magnifyingGlassCircle",    .magnifyingGlassCircle),
+        ("plus",                     .plus),
+        ("minus",                    .minus),
+        ("check",                    .check),
+        ("pencil",                   .pencil),
+        ("pencilSquare",             .pencilSquare),
+        ("trash",                    .trash),
+        ("photo",                    .photo),
+        ("document",                 .document),
+        ("clock",                    .clock),
+        ("ellipsisHCircle",          .ellipsisHorizontalCircle),
+        ("videoSlash",               .videoSlash),
+        ("pauseCircle",              .pauseCircle),
+        ("squaresGrid",              .squaresGrid),
+        ("listBullet",               .listBullet),
+        ("lockClosed",               .lockClosed),
+        ("xCircle",                  .xCircle),
+        ("lockClosedFilled",         .lockClosedFilled),
+        ("documentFilled",           .documentFilled),
+        ("photoFilled",              .photoFilled),
+        ("clockFilled",              .clockFilled),
+        ("checkCircle",              .checkCircle),
+        ("minusCircle",              .minusCircle),
+        ("plusCircle",               .plusCircle),
+        ("pauseCircleFilled",        .pauseCircleFilled),
+        ("chevronRight (mini)",      .chevronRight),
+    ]
+
+    private var iconsSection: some View {
+        PlaygroundSection(title: "Heroicons (AppIcon)") {
+            LazyVGrid(
+                columns: Array(repeating: GridItem(.flexible()), count: 6),
+                spacing: 16
+            ) {
+                ForEach(allIcons, id: \.0) { name, icon in
+                    VStack(spacing: 6) {
+                        HeroIcon(icon, size: 24)
+                            .foregroundStyle(.primary)
+                        Text(name)
+                            .font(.system(size: 8))
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Status Icons
+
+    private var statusIconsSection: some View {
+        PlaygroundSection(title: "Status Icons (StatusIconView)") {
+            HStack(spacing: 24) {
+                ForEach(KnittingProject.Status.allCases, id: \.self) { status in
+                    VStack(spacing: 6) {
+                        StatusIconView(status: status, size: 24)
+                        Text(status.rawValue)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
 /// Simple wrapping horizontal layout for badge rows
-private struct FlowLayout: Layout {
+private struct PlaygroundFlowLayout: Layout {
     var spacing: CGFloat = 8
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {

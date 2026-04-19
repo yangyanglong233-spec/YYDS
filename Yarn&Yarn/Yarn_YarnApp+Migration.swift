@@ -1,5 +1,5 @@
 //
-//  Yarn_YarnApp+Migration.swift
+//  ToriApp+Migration.swift
 //  Yarn&Yarn
 //
 //  Created by Yangyang Long on 3/17/26.
@@ -180,7 +180,7 @@ enum MarkerSchemaV2: VersionedSchema {
 // MARK: - How to Use This Migration Plan
 
 /*
- To enable proper migration, update Yarn_YarnApp.swift:
+ To enable proper migration, update ToriApp.swift:
  
  var sharedModelContainer: ModelContainer = {
      let schema = Schema(versionedSchema: MarkerSchemaV2.self)

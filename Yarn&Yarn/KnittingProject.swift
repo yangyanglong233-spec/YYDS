@@ -17,6 +17,20 @@ final class KnittingProject {
     @Relationship(deleteRule: .nullify)
     var pattern: InstructionDocument?
 
+    /// Zero-based index of the last page the user viewed. Restored on next open.
+    var lastReadPage: Int
+
+    // MARK: - "I am here" reading position
+    var hasReadingPosition: Bool = false
+    var readingPositionPage: Int = 0
+    /// Normalized (0–1) X coordinate within the PDF page (left = 0).
+    var readingPositionX: Double = 0.5
+    /// Normalized (0–1) Y coordinate within the PDF page (bottom = 0, top = 1).
+    var readingPositionY: Double = 0.5
+
+    /// Optional user-chosen cover image for this project (overrides pattern cover).
+    var coverImageData: Data? = nil
+
     // MARK: - Status
 
     enum Status: String, CaseIterable {
@@ -61,12 +75,14 @@ final class KnittingProject {
         name: String = "",
         pattern: InstructionDocument? = nil,
         startDate: Date = Date(),
-        status: Status = .notStarted
+        status: Status = .notStarted,
+        lastReadPage: Int = 0
     ) {
         self.id = UUID()
         self.name = name
         self.pattern = pattern
         self.startDate = startDate
         self.statusRaw = status.rawValue
+        self.lastReadPage = lastReadPage
     }
 }

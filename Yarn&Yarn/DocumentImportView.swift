@@ -53,7 +53,7 @@ struct DocumentImportView: View {
                         matching: .images
                     ) {
                         ImportOptionCard(
-                            icon: "photo.on.rectangle",
+                            icon: .photoFilled,
                             title: "Import Image",
                             description: "Choose a photo from your library"
                         )
@@ -67,7 +67,7 @@ struct DocumentImportView: View {
 
                     Button { showingDocumentPicker = true } label: {
                         ImportOptionCard(
-                            icon: "doc.fill",
+                            icon: .documentFilled,
                             title: "Import PDF",
                             description: "Choose a PDF document"
                         )
@@ -297,8 +297,7 @@ struct TagPickerRow: View {
                     .buttonStyle(.plain)
                 }
                 Button(action: onAddTap) {
-                    Image(systemName: "plus")
-                        .font(.subheadline)
+                    HeroIcon(.plus, size: 14)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
                         .background(Color(.secondarySystemBackground))
@@ -314,14 +313,13 @@ struct TagPickerRow: View {
 // MARK: - Import option card
 
 struct ImportOptionCard: View {
-    let icon: String
+    let icon: AppIcon
     let title: String
     let description: String
 
     var body: some View {
         HStack(spacing: 16) {
-            Image(systemName: icon)
-                .font(.system(size: 40))
+            HeroIcon(icon, size: 40)
                 .foregroundStyle(.blue)
                 .frame(width: 60)
 
@@ -332,7 +330,7 @@ struct ImportOptionCard: View {
 
             Spacer()
 
-            Image(systemName: "chevron.right").foregroundStyle(.tertiary)
+            HeroIcon(.chevronRight, size: 14).foregroundStyle(.tertiary)
         }
         .padding()
         .background(

@@ -18,7 +18,7 @@ struct ContentView: View {
     enum Tab { case library, project }
     enum LibraryLayout { case card, list }
 
-    @State private var selectedTab:    Tab           = .library
+    @State private var selectedTab:    Tab           = .project
     @State private var libraryLayout:  LibraryLayout = .card
     @State private var librarySearch:  String        = ""
     @State private var showingImport     = false
@@ -38,8 +38,8 @@ struct ContentView: View {
 
                     if selectedTab == .library {
                         Picker("Layout", selection: $libraryLayout) {
-                            Image(systemName: "square.grid.2x2").tag(LibraryLayout.card)
-                            Image(systemName: "list.bullet").tag(LibraryLayout.list)
+                            HeroIcon(.squaresGrid, size: 16).tag(LibraryLayout.card)
+                            HeroIcon(.listBullet, size: 16).tag(LibraryLayout.list)
                         }
                         .pickerStyle(.segmented)
                         .frame(width: 80)
@@ -53,9 +53,8 @@ struct ContentView: View {
                 // ── Search bar (library only) ────────────────────────────
                 if selectedTab == .library {
                     HStack(spacing: 8) {
-                        Image(systemName: "magnifyingglass")
+                        HeroIcon(.magnifyingGlass, size: 14)
                             .foregroundStyle(.secondary)
-                            .font(.subheadline)
                         TextField("Search patterns", text: $librarySearch)
                             .font(.subheadline)
                             .autocorrectionDisabled()
@@ -64,7 +63,7 @@ struct ContentView: View {
                             Button {
                                 librarySearch = ""
                             } label: {
-                                Image(systemName: "xmark.circle.fill")
+                                HeroIcon(.xCircle, size: 16)
                                     .foregroundStyle(.secondary)
                             }
                             .buttonStyle(.plain)
@@ -112,10 +111,9 @@ struct ContentView: View {
                     }
                 } label: {
                     HStack(spacing: 8) {
-                        Image(systemName: "plus")
-                            .font(.system(size: 15, weight: .bold))
+                        HeroIcon(.plus, size: 15)
                         Text(selectedTab == .library ? "Upload Pattern" : "Start a project")
-                            .font(.subheadline.weight(.semibold))
+                            .font(DesignTokens.Typography.display(DesignTokens.Typography.sizeMD, weight: DesignTokens.Typography.Weight.semibold))
                     }
                     .foregroundStyle(.white)
                     .padding(.horizontal, 24)
@@ -249,6 +247,8 @@ struct ProjectTabView: View {
     let projects:  [KnittingProject]
     let onDelete: (KnittingProject) -> Void
 
+    @State private var projectToEdit: KnittingProject? = nil
+
     var body: some View {
         if projects.isEmpty {
             ContentUnavailableView {
@@ -265,6 +265,9 @@ struct ProjectTabView: View {
                         }
                         .buttonStyle(.plain)
                         .contextMenu {
+                            Button("Edit Project Info", systemImage: "pencil") {
+                                projectToEdit = project
+                            }
                             // Quick status change
                             Menu("Set Status", systemImage: "circle.lefthalf.filled") {
                                 ForEach(KnittingProject.Status.allCases, id: \.self) { s in
@@ -284,6 +287,9 @@ struct ProjectTabView: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
+            }
+            .sheet(item: $projectToEdit) { proj in
+                ProjectEditSheet(project: proj)
             }
         }
     }
@@ -305,8 +311,7 @@ struct DocumentCardView: View {
                     if let img = thumbnail {
                         Image(uiImage: img).resizable().scaledToFill()
                     } else {
-                        Image(systemName: document.isPDF ? "doc.fill" : "photo.fill")
-                            .font(.system(size: 36))
+                        HeroIcon(document.isPDF ? .documentFilled : .photoFilled, size: 36)
                             .foregroundStyle(.tertiary)
                     }
                 }
@@ -360,8 +365,7 @@ struct DocumentListRowView: View {
                     if let img = thumbnail {
                         Image(uiImage: img).resizable().scaledToFill()
                     } else {
-                        Image(systemName: document.isPDF ? "doc.fill" : "photo.fill")
-                            .font(.system(size: 18))
+                        HeroIcon(document.isPDF ? .documentFilled : .photoFilled, size: 18)
                             .foregroundStyle(.tertiary)
                     }
                 }
@@ -385,8 +389,7 @@ struct DocumentListRowView: View {
 
             Spacer()
 
-            Image(systemName: "chevron.right")
-                .font(.caption)
+            HeroIcon(.chevronRight, size: 12)
                 .foregroundStyle(.tertiary)
         }
         .padding(.vertical, 10)
@@ -415,16 +418,25 @@ struct DocumentListRowView: View {
 
 struct ProjectRowView: View {
     let project: KnittingProject
+    @State private var thumbnail: UIImage?
 
     var body: some View {
         HStack(spacing: 12) {
-            // Status icon
-            Image(systemName: project.status.icon)
-                .foregroundStyle(project.status.color)
-                .font(.system(size: 18))
-                .frame(width: 28)
+            // Portrait thumbnail (project cover > pattern cover > PDF page 0)
+            Color(.secondarySystemBackground)
+                .frame(width: 48, height: 64)
+                .overlay {
+                    if let img = thumbnail {
+                        Image(uiImage: img).resizable().scaledToFill()
+                    } else {
+                        Image(systemName: "doc.text")
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .clipped()
+                .clipShape(RoundedRectangle(cornerRadius: 6))
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(project.displayName)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.primary)
@@ -442,27 +454,59 @@ struct ProjectRowView: View {
                 Text(project.startDate.formatted(.dateTime.month(.abbreviated).day().year()))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                // Progress bar — shown only after "I'm Here" marker has been set
+                if let pct = rowReadingProgress {
+                    GeometryReader { g in
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(Color.secondary.opacity(0.18))
+                            Capsule()
+                                .fill(Color.accentColor)
+                                .frame(width: g.size.width * pct)
+                        }
+                    }
+                    .frame(height: 4)
+                    .padding(.top, 2)
+                }
             }
 
             Spacer()
 
-            // Status badge
-            Text(project.status.rawValue)
-                .font(.caption.weight(.medium))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(Capsule().fill(project.status.color.opacity(0.14)))
-                .foregroundStyle(project.status.color)
-
-            Image(systemName: "chevron.right")
-                .font(.caption)
+            HeroIcon(.chevronRight, size: 12)
                 .foregroundStyle(.tertiary)
         }
-        .padding(.vertical, 12)
+        .padding(.vertical, 10)
         .padding(.horizontal, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 12).fill(Color(.systemBackground)))
         .shadow(color: .black.opacity(0.05), radius: 4, x: 0, y: 2)
+        .task(id: project.id) { await loadThumbnail() }
+    }
+
+    /// 1-column progress approximation (full column analysis is only available inside the PDF viewer).
+    private var rowReadingProgress: Double? {
+        guard project.hasReadingPosition,
+              let fileData = project.pattern?.fileData,
+              let pdf = PDFDocument(data: fileData),
+              pdf.pageCount > 0 else { return nil }
+        let total = pdf.pageCount
+        let withinPage = 1.0 - project.readingPositionY   // Y: bottom=0, top=1
+        return min(1.0, (Double(project.readingPositionPage) + withinPage) / Double(total))
+    }
+
+    private func loadThumbnail() async {
+        // Priority: project cover → pattern cover → PDF first page
+        if let data = project.coverImageData, let img = UIImage(data: data) {
+            thumbnail = img; return
+        }
+        if let data = project.pattern?.coverImageData, let img = UIImage(data: data) {
+            thumbnail = img; return
+        }
+        if let fileData = project.pattern?.fileData,
+           let pdf = PDFDocument(data: fileData),
+           let page = pdf.page(at: 0) {
+            thumbnail = page.thumbnail(of: CGSize(width: 150, height: 200), for: .mediaBox)
+        }
     }
 }
 
@@ -495,7 +539,7 @@ struct LibraryPatternView: View {
                 Button {
                     showingEditSheet = true
                 } label: {
-                    Image(systemName: "square.and.pencil")
+                    HeroIcon(.pencilSquare)
                 }
             }
         }
@@ -507,10 +551,9 @@ struct LibraryPatternView: View {
                     showingCreateProject = true
                 } label: {
                     HStack(spacing: 8) {
-                        Image(systemName: "plus")
-                            .font(.system(size: 15, weight: .bold))
+                        HeroIcon(.plus, size: 15)
                         Text("Create Project")
-                            .font(.subheadline.weight(.semibold))
+                            .font(DesignTokens.Typography.display(DesignTokens.Typography.sizeMD, weight: DesignTokens.Typography.Weight.semibold))
                     }
                     .foregroundStyle(.white)
                     .padding(.horizontal, 24)
@@ -579,8 +622,7 @@ struct NewProjectSheet: View {
                         HStack {
                             Text(fixed.title)
                             Spacer()
-                            Image(systemName: "lock.fill")
-                                .font(.caption)
+                            HeroIcon(.lockClosedFilled, size: 12)
                                 .foregroundStyle(.secondary)
                         }
                     } else if documents.isEmpty {
@@ -807,6 +849,101 @@ struct DocumentEditSheet: View {
         }
         selected.insert(tag)
         newTagName = ""
+    }
+}
+
+// MARK: - Project edit sheet
+
+struct ProjectEditSheet: View {
+    @Bindable var project: KnittingProject
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var coverPhotoItem: PhotosPickerItem?
+    @State private var localCoverImage: UIImage?
+
+    private var displayedCover: UIImage? {
+        if let data = project.coverImageData { return UIImage(data: data) }
+        if let data = project.pattern?.coverImageData { return UIImage(data: data) }
+        return nil
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    VStack(spacing: 12) {
+                        // Cover preview
+                        Group {
+                            if let img = localCoverImage ?? displayedCover {
+                                Image(uiImage: img)
+                                    .resizable()
+                                    .scaledToFill()
+                            } else {
+                                Color(.secondarySystemBackground)
+                                    .overlay {
+                                        Image(systemName: "photo")
+                                            .font(.system(size: 44))
+                                            .foregroundStyle(.tertiary)
+                                    }
+                            }
+                        }
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 220)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+
+                        PhotosPicker(selection: $coverPhotoItem, matching: .images) {
+                            Label("Change Cover Image", systemImage: "photo.badge.plus")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderless)
+                        .onChange(of: coverPhotoItem) { _, item in
+                            Task {
+                                if let data = try? await item?.loadTransferable(type: Data.self) {
+                                    project.coverImageData = data
+                                    localCoverImage = UIImage(data: data)
+                                }
+                            }
+                        }
+
+                        if project.coverImageData != nil {
+                            Button(role: .destructive) {
+                                project.coverImageData = nil
+                                localCoverImage = nil
+                            } label: {
+                                Label("Remove Custom Cover", systemImage: "trash")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                    }
+                    .listRowInsets(EdgeInsets(top: 12, leading: 12, bottom: 12, trailing: 12))
+                }
+
+                Section("Project Name") {
+                    TextField("Optional — defaults to pattern name", text: $project.name)
+                }
+
+                if let pattern = project.pattern {
+                    Section("Pattern") {
+                        HStack {
+                            Text(pattern.title)
+                            Spacer()
+                            Image(systemName: "lock.fill")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Edit Project")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                        .fontWeight(.semibold)
+                }
+            }
+        }
     }
 }
 

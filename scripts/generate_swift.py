@@ -166,19 +166,78 @@ def marker_section(marker: dict) -> list[str]:
     return lines
 
 
-def typography_section(size: dict) -> list[str]:
-    labels = {
+def typography_section(typo: dict) -> list[str]:
+    size   = typo.get("size",   {})
+    weight = typo.get("weight", {})
+    family = typo.get("family", {})
+
+    # Figma weight name → SwiftUI Font.Weight
+    weight_map = {
+        "Regular":   ".regular",
+        "Medium":    ".medium",
+        "SemiBold":  ".semibold",
+        "Semi Bold": ".semibold",
+        "Bold":      ".bold",
+        "Italic":    ".regular",  # handled via Font.italic() modifier
+        "Light":     ".light",
+        "Extra Bold":".heavy",
+        "Black":     ".black",
+    }
+
+    size_labels = {
         "xs": "sizeXS", "sm": "sizeSM", "base": "sizeBase", "md": "sizeMD",
         "lg": "sizeLG", "xl": "sizeXL", "xxl": "sizeXXL", "hero": "sizeHero",
     }
-    lines = ["", "    // MARK: - Typography", "", "    enum Typography {",
-             "        /// Font size scale (points)"]
-    for key, swift_name in labels.items():
-        token = size.get(key, {})
-        val = swift_cgfloat(token.get("$value", 0))
-        desc = token.get("$description", "")
+
+    lines = ["", "    // MARK: - Typography", "", "    enum Typography {"]
+
+    # Families (now a nested dict with display/body keys)
+    display_val = family.get("display", {}).get("$value", "Fraunces")
+    body_val    = family.get("body",    {}).get("$value", "DM Sans")
+    display_desc = family.get("display", {}).get("$description", "")
+    body_desc    = family.get("body",    {}).get("$description", "")
+    lines += [
+        "        // MARK: Families",
+        "        /// Download from fonts.google.com, add .ttf files to Xcode + register in Info.plist",
+        f'        /// {display_desc}',
+        f'        static let displayFamily = "{display_val}"',
+        f'        /// {body_desc}',
+        f'        static let bodyFamily    = "{body_val}"',
+        "",
+        "        /// Convenience — returns Font.custom() for display (headers/titles)",
+        "        static func display(_ size: CGFloat, weight: Font.Weight = Weight.bold) -> Font {",
+        f'            Font.custom(displayFamily, size: size).weight(weight)',
+        "        }",
+        "",
+        "        /// Convenience — returns Font.custom() for body (UI text)",
+        "        static func body(_ size: CGFloat, weight: Font.Weight = Weight.regular) -> Font {",
+        f'            Font.custom(bodyFamily, size: size).weight(weight)',
+        "        }",
+        "",
+    ]
+
+    # Weights
+    if weight:
+        lines.append("        // MARK: Weights")
+        lines.append("        enum Weight {")
+        for key in ["regular", "semibold", "bold"]:
+            tok = weight.get(key, {})
+            figma_val = tok.get("$value", "")
+            swift_val = weight_map.get(figma_val, ".regular")
+            lines.append(f'            static let {key}: Font.Weight = {swift_val}  // Figma: "{figma_val}"')
+        lines.append("        }")
+        lines.append("")
+
+    # Sizes
+    lines.append("        // MARK: Sizes")
+    lines.append("        /// Font size scale (points)")
+    for key, swift_name in size_labels.items():
+        tok = size.get(key, {})
+        val = swift_cgfloat(tok.get("$value", 0))
+        desc = tok.get("$description", "")
         comment = f"  // {desc}" if desc else ""
         lines.append(f"        static let {swift_name}: CGFloat = {val}{comment}")
+
     lines.append("    }")
     return lines
 
@@ -252,7 +311,7 @@ def generate(tokens: dict) -> str:
     lines += status_section(colors.get("status", {}))
     lines += category_section(colors.get("category", {}))
     lines += marker_section(colors.get("marker", {}))
-    lines += typography_section(tokens.get("typography", {}).get("size", {}))
+    lines += typography_section(tokens.get("typography", {}))
     lines += spacing_section(tokens.get("spacing", {}))
     lines += radius_section(tokens.get("radius", {}))
     lines += shadow_section(tokens.get("shadow", {}))

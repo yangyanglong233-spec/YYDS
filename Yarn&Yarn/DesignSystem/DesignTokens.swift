@@ -90,6 +90,31 @@ enum DesignTokens {
     // MARK: - Typography
 
     enum Typography {
+        // MARK: Families
+        /// Download from fonts.google.com, add .ttf files to Xcode + register in Info.plist
+        /// Header / display font — used for titles and large text
+        static let displayFamily = "Fraunces"
+        /// Body / UI font — used for all interface text
+        static let bodyFamily    = "DM Sans"
+
+        /// Convenience — returns Font.custom() for display (headers/titles)
+        static func display(_ size: CGFloat, weight: Font.Weight = Weight.bold) -> Font {
+            Font.custom(displayFamily, size: size).weight(weight)
+        }
+
+        /// Convenience — returns Font.custom() for body (UI text)
+        static func body(_ size: CGFloat, weight: Font.Weight = Weight.regular) -> Font {
+            Font.custom(bodyFamily, size: size).weight(weight)
+        }
+
+        // MARK: Weights
+        enum Weight {
+            static let regular: Font.Weight = .regular  // Figma: "Regular"
+            static let semibold: Font.Weight = .semibold  // Figma: "SemiBold"
+            static let bold: Font.Weight = .bold  // Figma: "Bold"
+        }
+
+        // MARK: Sizes
         /// Font size scale (points)
         static let sizeXS: CGFloat = 10  // Smallest label text (monospaced PDF)
         static let sizeSM: CGFloat = 12  // Caption / min reader size

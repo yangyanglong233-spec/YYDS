@@ -9,7 +9,7 @@ import SwiftUI
 import PDFKit
 import SwiftData
 
-enum ActiveTab { case glossary, counter }
+enum ActiveTab { case glossary, counter, marker }
 
 struct DocumentViewerView: View {
     @Environment(\.modelContext) private var modelContext
@@ -30,12 +30,19 @@ struct DocumentViewerView: View {
     @State private var lastDragStart: CGPoint = .zero        // v.startLocation of current gesture
     @State private var lensTerms: [(term: KnittingGlossary.Term, screenRect: CGRect)] = []
     @State private var showingGlossary = false
-    @State private var currentPage = 0
+    @State private var currentPage: Int                      // seeded from project.lastReadPage
     @State private var showingTextReader = false
     @State private var showingEditSheet = false
+    @State private var showingProjectEditSheet = false
     @State private var counterToEdit: Marker?
     @State private var visibleCounterIDs: Set<UUID> = []
     @State private var viewportCenter: CGPoint = CGPoint(x: 0.5, y: 0.5)
+
+    init(document: InstructionDocument, project: KnittingProject) {
+        self._document = Bindable(document)
+        self._project  = Bindable(project)
+        self._currentPage = State(initialValue: project.lastReadPage)
+    }
 
     private var lensActive: Bool { activeTab == .glossary }
 
@@ -66,7 +73,26 @@ struct DocumentViewerView: View {
                     }
                 } else {
                     // PDF viewer mode - with markers and lens
-                    NativePDFDocumentView(pdfData: document.fileData, document: document, lensBridge: lensBridge, currentPage: $currentPage, visibleCounterIDs: $visibleCounterIDs, viewportCenter: $viewportCenter)
+                    NativePDFDocumentView(
+                        pdfData: document.fileData,
+                        document: document,
+                        lensBridge: lensBridge,
+                        currentPage: $currentPage,
+                        visibleCounterIDs: $visibleCounterIDs,
+                        viewportCenter: $viewportCenter,
+                        hasReadingPosition: project.hasReadingPosition,
+                        isReadingMarkerVisible: activeTab == .marker,
+                        readingPositionPage: project.readingPositionPage,
+                        readingPositionX: project.readingPositionX,
+                        readingPositionY: project.readingPositionY,
+                        onReadingPositionMoved: { page, x, y in
+                            project.readingPositionPage = page
+                            project.readingPositionX    = x
+                            project.readingPositionY    = y
+                            project.hasReadingPosition  = true
+                            try? modelContext.save()
+                        }
+                    )
                 }
             } else {
                 ImageDocumentView(imageData: document.fileData, document: document, highlightingEnabled: false)
@@ -133,6 +159,16 @@ struct DocumentViewerView: View {
         .onGeometryChange(for: CGPoint.self) { $0.frame(in: .global).origin } action: {
             lensBridge.lensOriginInWindow = $0
         }
+        .onChange(of: currentPage) {
+            project.lastReadPage = currentPage
+            try? modelContext.save()
+        }
+        .onChange(of: activeTab) {
+            // Auto-place the marker the first time the user opens the tab
+            if activeTab == .marker && !project.hasReadingPosition {
+                markMyPosition()
+            }
+        }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if !showingTextReader {
                 VStack(spacing: 0) {
@@ -149,6 +185,12 @@ struct DocumentViewerView: View {
                                 try? modelContext.save()
                             },
                             onAddCounter: addCounter
+                        )
+                    } else if activeTab == .marker {
+                        Divider()
+                        MarkerPanelView(
+                            hasMarker: project.hasReadingPosition,
+                            onRefresh: markMyPosition
                         )
                     }
                     Divider()
@@ -182,44 +224,63 @@ struct DocumentViewerView: View {
                 }
             }
 
-            // Project status pill
+            // Reading progress (replaces status pill)
             ToolbarItem(placement: .principal) {
-                Menu {
-                    ForEach(KnittingProject.Status.allCases, id: \.self) { s in
-                        Button {
-                            project.status = s
-                            try? modelContext.save()
-                        } label: {
-                            Label(s.rawValue, systemImage: s.icon)
+                if let pct = readingProgress {
+                    HStack(spacing: 6) {
+                        // Mini progress bar
+                        GeometryReader { g in
+                            ZStack(alignment: .leading) {
+                                Capsule().fill(Color.secondary.opacity(0.2))
+                                Capsule().fill(Color.accentColor)
+                                    .frame(width: g.size.width * pct)
+                            }
                         }
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: project.status.icon)
-                        Text(project.status.rawValue)
+                        .frame(width: 56, height: 5)
+                        Text("\(Int(pct * 100))%")
                             .font(.caption.weight(.semibold))
+                            .foregroundStyle(.primary)
                     }
-                    .foregroundStyle(project.status.color)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Capsule().fill(project.status.color.opacity(0.12)))
+                } else {
+                    // No marker set yet — show project title subtitle
+                    Text(project.displayName)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
                 }
             }
 
             ToolbarItem(placement: .primaryAction) {
                 Menu {
+                    // Status
+                    Menu("Status: \(project.status.rawValue)", systemImage: project.status.icon) {
+                        ForEach(KnittingProject.Status.allCases, id: \.self) { s in
+                            Button {
+                                project.status = s
+                                try? modelContext.save()
+                            } label: {
+                                Label(s.rawValue, systemImage: s.icon)
+                            }
+                        }
+                    }
+
+                    Divider()
+
                     Button {
                         showingGlossary = true
                     } label: {
                         Label("View Glossary", systemImage: "book.closed")
                     }
 
-                    Divider()
-
                     Button {
                         showingEditSheet = true
                     } label: {
                         Label("Edit Pattern Info", systemImage: "pencil")
+                    }
+
+                    Button {
+                        showingProjectEditSheet = true
+                    } label: {
+                        Label("Edit Project Info", systemImage: "folder.badge.person.crop")
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")
@@ -231,6 +292,9 @@ struct DocumentViewerView: View {
         }
         .sheet(isPresented: $showingEditSheet) {
             DocumentEditSheet(document: document)
+        }
+        .sheet(isPresented: $showingProjectEditSheet) {
+            ProjectEditSheet(project: project)
         }
     }
     
@@ -274,6 +338,37 @@ struct DocumentViewerView: View {
 
     // MARK: - Lens helpers
 
+    // MARK: - "I am here" marker
+
+    private func markMyPosition() {
+        project.readingPositionPage = currentPage
+        project.readingPositionX    = viewportCenter.x
+        project.readingPositionY    = viewportCenter.y
+        project.hasReadingPosition  = true
+        try? modelContext.save()
+        let impact = UIImpactFeedbackGenerator(style: .medium)
+        impact.impactOccurred()
+    }
+
+    /// 0–1 progress through the document, accounting for 1- or 2-column layout.
+    private var readingProgress: Double? {
+        guard project.hasReadingPosition,
+              let pdf = PDFDocument(data: document.fileData),
+              pdf.pageCount > 0 else { return nil }
+        let total = pdf.pageCount
+        let columnCount = lensBridge.detectColumnCount?(project.readingPositionPage) ?? 1
+        let x = project.readingPositionX
+        let y = project.readingPositionY  // 0 = page bottom, 1 = page top
+        let withinPage: Double
+        if columnCount == 2 {
+            // Left column = first half of page progress; right column = second half
+            withinPage = x < 0.5 ? (1 - y) * 0.5 : 0.5 + (1 - y) * 0.5
+        } else {
+            withinPage = 1 - y
+        }
+        return min(1.0, (Double(project.readingPositionPage) + withinPage) / Double(total))
+    }
+
     private func refreshLensTerms() {
         let radius: CGFloat = 100
         let origin = lensBridge.lensOriginInWindow
@@ -302,6 +397,12 @@ struct NativePDFDocumentView: View {
     @Binding var currentPage: Int
     var visibleCounterIDs: Binding<Set<UUID>>
     var viewportCenter: Binding<CGPoint>
+    var hasReadingPosition: Bool
+    var isReadingMarkerVisible: Bool
+    var readingPositionPage: Int
+    var readingPositionX: Double
+    var readingPositionY: Double
+    var onReadingPositionMoved: ((Int, Double, Double) -> Void)?
 
     // Stored in @State so the PDFDocument object is created once and remains
     // stable across re-renders. Without this, body creates a new PDFDocument
@@ -318,7 +419,13 @@ struct NativePDFDocumentView: View {
                     lensBridge: lensBridge,
                     currentPage: $currentPage,
                     visibleCounterIDs: visibleCounterIDs,
-                    viewportCenter: viewportCenter
+                    viewportCenter: viewportCenter,
+                    hasReadingPosition: hasReadingPosition,
+                    isReadingMarkerVisible: isReadingMarkerVisible,
+                    readingPositionPage: readingPositionPage,
+                    readingPositionX: readingPositionX,
+                    readingPositionY: readingPositionY,
+                    onReadingPositionMoved: onReadingPositionMoved
                 )
             } else {
                 Text("Unable to load PDF")
@@ -1108,7 +1215,7 @@ struct DocumentToolbarTabs: View {
             if isPDF {
                 ToolTabButton(
                     title: "Glossary",
-                    systemImage: activeTab == .glossary ? "magnifyingglass.circle.fill" : "magnifyingglass.circle",
+                    icon: .magnifyingGlassCircle,
                     isActive: activeTab == .glossary
                 ) {
                     withAnimation(.spring(response: 0.3)) {
@@ -1119,11 +1226,21 @@ struct DocumentToolbarTabs: View {
 
             ToolTabButton(
                 title: "Counters",
-                systemImage: activeTab == .counter ? "timer.circle.fill" : "timer.circle",
+                icon: .clock,
                 isActive: activeTab == .counter
             ) {
                 withAnimation(.spring(response: 0.3)) {
                     activeTab = activeTab == .counter ? nil : .counter
+                }
+            }
+
+            ToolTabButton(
+                title: "I'm Here",
+                systemImage: "cursorarrow",
+                isActive: activeTab == .marker
+            ) {
+                withAnimation(.spring(response: 0.3)) {
+                    activeTab = activeTab == .marker ? nil : .marker
                 }
             }
 
@@ -1134,17 +1251,66 @@ struct DocumentToolbarTabs: View {
     }
 }
 
+// MARK: - Marker Panel
+
+struct MarkerPanelView: View {
+    let hasMarker: Bool
+    let onRefresh: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "cursorarrow")
+                .font(.system(size: 18))
+                .foregroundStyle(Color.accentColor)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("I'm Here Marker")
+                    .font(.subheadline.weight(.medium))
+                Text(hasMarker ? "Showing your last reading position" : "Tap refresh to mark your current position")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Button(action: onRefresh) {
+                Label("Refresh", systemImage: "arrow.clockwise")
+                    .font(.subheadline.weight(.medium))
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+    }
+}
+
 struct ToolTabButton: View {
     let title: String
-    let systemImage: String
+    let icon: AppIcon?
+    let systemImage: String?
     let isActive: Bool
     let action: () -> Void
+
+    init(title: String, icon: AppIcon, isActive: Bool, action: @escaping () -> Void) {
+        self.title = title; self.icon = icon; self.systemImage = nil
+        self.isActive = isActive; self.action = action
+    }
+
+    init(title: String, systemImage: String, isActive: Bool, action: @escaping () -> Void) {
+        self.title = title; self.icon = nil; self.systemImage = systemImage
+        self.isActive = isActive; self.action = action
+    }
 
     var body: some View {
         Button(action: action) {
             VStack(spacing: 3) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 22))
+                if let icon {
+                    HeroIcon(icon, size: 22)
+                } else if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 22))
+                }
                 Text(title)
                     .font(.caption2)
             }
@@ -1265,8 +1431,7 @@ struct CounterRowView: View {
                 counter.decrement()
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
             } label: {
-                Image(systemName: "minus")
-                    .font(.system(size: 14, weight: .semibold))
+                HeroIcon(.minus, size: 14)
                     .frame(width: 36, height: 36)
                     .background(Circle().stroke(Color(.separator), lineWidth: 1))
                     // Extend the tap area beyond the visible circle so nearby taps register
@@ -1284,8 +1449,7 @@ struct CounterRowView: View {
                 counter.increment()
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
             } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 14, weight: .semibold))
+                HeroIcon(.plus, size: 14)
                     .frame(width: 36, height: 36)
                     .background(Circle().stroke(Color(.separator), lineWidth: 1))
                     .contentShape(Rectangle().size(CGSize(width: 52, height: 52))
@@ -1303,8 +1467,7 @@ struct CounterRowView: View {
             Spacer()
 
             Button(action: onEdit) {
-                Image(systemName: "pencil")
-                    .font(.system(size: 14))
+                HeroIcon(.pencil, size: 14)
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
@@ -1358,9 +1521,8 @@ struct CounterEditSheet: View {
                         RoundedRectangle(cornerRadius: 8)
                             .fill(Color.accentColor.opacity(0.15))
                             .frame(width: 36, height: 36)
-                        Image(systemName: "plus")
+                        HeroIcon(.plus, size: 14)
                             .foregroundStyle(Color.accentColor)
-                            .font(.system(size: 14, weight: .semibold))
                     }
 
                     VStack(alignment: .leading, spacing: 2) {
@@ -1411,9 +1573,8 @@ struct CounterEditSheet: View {
                             RoundedRectangle(cornerRadius: 8)
                                 .fill(Color.red.opacity(0.1))
                                 .frame(width: 36, height: 36)
-                            Image(systemName: "trash")
+                            HeroIcon(.trash, size: 14)
                                 .foregroundStyle(.red)
-                                .font(.system(size: 14))
                         }
                         Text("Remove counter")
                             .foregroundStyle(.red)

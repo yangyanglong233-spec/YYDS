@@ -1,6 +1,6 @@
 //
-//  Yarn_YarnApp.swift
-//  Yarn&Yarn
+//  ToriApp.swift
+//  Tori
 //
 //  Created by Yangyang Long on 3/16/26.
 //
@@ -9,7 +9,7 @@ import SwiftUI
 import SwiftData
 
 @main
-struct Yarn_YarnApp: App {
+struct ToriApp: App {
     var sharedModelContainer: ModelContainer = {
         let schema = Schema([
             InstructionDocument.self,
